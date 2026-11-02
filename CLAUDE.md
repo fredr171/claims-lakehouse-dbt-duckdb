@@ -84,7 +84,7 @@ raw:     cms/desynpuf/<file_type>/year=<yyyy>/sample=<n>/part-0.parquet   (benef
 ## Current status
 
 - [x] AWS account, root MFA, budget alert, IAM admin user with MFA
-- [x] Buckets: landing, raw (marts still to create)
-- [ ] AWS CLI installed and configured
+- [x] Buckets: landing, raw, marts (us-east-2, Block Public Access, SSE-S3 verified)
+- [x] AWS CLI v2 installed and configured (IAM user fredr-admin, default profile)
 - [ ] Ingestion script: beneficiary_summary 2008
 - [ ] dbt project setup
