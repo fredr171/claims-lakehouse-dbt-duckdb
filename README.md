@@ -88,13 +88,37 @@ python -m venv .venv
 JSON-lines logs go to stderr, and a JSON summary of manifest records goes to stdout. Exit codes:
 `0` all success/skipped, `2` something was quarantined, `1` an error occurred.
 
-`lambda_handler.handler` accepts S3 `ObjectCreated` events and calls the same `process_zip`
-(not deployed yet).
+## Automatic ingestion (AWS Lambda)
+
+Uploading a `.zip` under `s3://fredr-claims-landing-2026/cms/desynpuf/` triggers the
+`claims-etl-ingest` Lambda, which runs the same `process_zip`. It's defined in
+[`infra/terraform/`](infra/terraform/):
+
+| Resource | Details |
+|---|---|
+| Lambda `claims-etl-ingest` | Python 3.13, 1024 MB, 300 s timeout, 2 GB `/tmp` |
+| pyarrow | AWS SDK for pandas public layer (`AWSSDKPandas-Python313:17`, pyarrow 24) |
+| Package | `build/lambda.zip`: our code, `config/`, PyYAML (~0.8 MB, deterministic) |
+| IAM role | Least privilege: read/delete `cms/desynpuf/*`, write `archive/*` and `quarantine/*` in landing, write `cms/desynpuf/*` and `_manifests/*` in raw, own log group only |
+| Trigger | S3 `ObjectCreated`, prefix `cms/desynpuf/`, suffix `.zip` (archive/quarantine moves can't re-trigger) |
+| Retries | An `error` outcome raises, so Lambda retries async invocations twice. `quarantined` is final and not retried |
+| Logs | `/aws/lambda/claims-etl-ingest`, JSON lines, 30-day retention |
+
+Deploy or update:
+
+```bash
+.venv/Scripts/python scripts/build_lambda.py        # rebuild the package
+cd infra/terraform
+terraform init                                       # first time only
+terraform plan -out=tfplan && terraform apply tfplan
+```
+
+Terraform state is local (gitignored). Move it to an S3 backend before CI or anyone else runs it.
 
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 99 tests, no AWS access (S3 is mocked with moto)
+.venv/Scripts/python -m pytest      # 101 tests, no AWS access (S3 is mocked with moto)
 .venv/Scripts/python -m ruff check src tests
 ```
 
@@ -124,5 +148,7 @@ src/claims_etl/ingestion/
   s3_store.py               the only boto3 code (download, upload, move = copy→verify→delete)
   manifest.py               idempotency records
   cli.py / lambda_handler.py
+scripts/build_lambda.py     Lambda deployment package
+infra/terraform/            Lambda, IAM role, log group, S3 trigger
 tests/
 ```

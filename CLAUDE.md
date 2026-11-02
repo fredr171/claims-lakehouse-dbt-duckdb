@@ -30,7 +30,12 @@ clarity, tests, and documentation matter as much as working output.
 - Flow: zip lands in landing -> Python ingestion extracts CSV, adds metadata,
   writes Parquet to raw -> dbt + DuckDB reads raw from S3, builds staging,
   intermediate, and marts -> marts published back to S3
-- Ingestion runs locally first; later wrapped in AWS Lambda triggered by S3 uploads
+- Ingestion runs in AWS Lambda `claims-etl-ingest`, triggered by S3 uploads under
+  landing cms/desynpuf/ (*.zip); the CLI runs the same process_zip locally.
+- Infra changes go through Terraform (infra/terraform), never the console. Rebuild
+  the package with `python scripts/build_lambda.py` before `terraform apply`.
+- Lambda Python version (3.13), the pandas layer ARN, and LAMBDA_PYTHON_VERSION in
+  scripts/build_lambda.py must stay in sync.
 
 ## S3 key layout
 
@@ -168,5 +173,8 @@ file, missing key, path traversal entry). Unit tests must never touch real S3.
 - [x] AWS CLI v2 installed and configured (IAM user fredr-admin, default profile)
 - [x] Ingestion script: beneficiary_summary 2008 (116,352 rows to raw, reconciled 2026-11-02)
 - [ ] Ingest beneficiary_summary 2009, 2010; then inpatient/outpatient claims (new configs)
-- [ ] Deploy Lambda handler (S3 trigger)
+- [x] Lambda `claims-etl-ingest` deployed via Terraform (infra/terraform, local state),
+      S3 trigger on landing cms/desynpuf/*.zip; pyarrow from AWSSDKPandas-Python313 layer
+- [ ] End-to-end test of the S3 trigger with a real upload (e.g. 2009 beneficiary)
+- [ ] Move Terraform state to an S3 backend before CI
 - [ ] dbt project setup

@@ -65,6 +65,10 @@ profiles.yml
 *.tfstate.*
 *.tfvars
 cdk.out/
+tfplan
+*.tfplan
+crash.log
+# (.terraform.lock.hcl IS committed: it pins provider versions)
 
 # ---------------------------------------------------------------
 # Editor / OS

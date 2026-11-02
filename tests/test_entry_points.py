@@ -11,7 +11,12 @@ import pytest
 from claims_etl.ingestion import cli, lambda_handler
 from claims_etl.ingestion.config import CONFIG_DIR_ENV_VAR
 from claims_etl.ingestion.models import ManifestRecord, Outcome
-from tests.conftest import LANDING_BUCKET, LANDING_KEY
+from tests.conftest import CSV_NAME, LANDING_BUCKET, LANDING_KEY, csv_bytes, make_zip
+
+
+def _s3_event(bucket: str, key: str) -> dict:
+    """Minimal S3 ObjectCreated event with one record."""
+    return {"Records": [{"s3": {"bucket": {"name": bucket}, "object": {"key": key}}}]}
 
 
 def _record(outcome: Outcome) -> ManifestRecord:
@@ -72,3 +77,24 @@ def test_handler_processes_landing_zip_and_ignores_others(
     }
     result = lambda_handler.handler(event, context=None)
     assert [r["outcome"] for r in result["results"]] == ["success"]
+
+
+def test_handler_raises_on_error_so_lambda_retries(
+    s3, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(CONFIG_DIR_ENV_VAR, str(config_dir))
+    # Object was never uploaded: download fails -> `error` outcome -> must raise.
+    event = _s3_event(LANDING_BUCKET, LANDING_KEY)
+    with pytest.raises(lambda_handler.IngestionRetryableError, match="will retry"):
+        lambda_handler.handler(event, context=None)
+
+
+def test_handler_does_not_raise_on_quarantine(
+    s3, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(CONFIG_DIR_ENV_VAR, str(config_dir))
+    bad = make_zip(tmp_path / "bad.zip", {CSV_NAME: csv_bytes([])})
+    s3.upload(bad, LANDING_BUCKET, LANDING_KEY)
+    event = _s3_event(LANDING_BUCKET, LANDING_KEY)
+    result = lambda_handler.handler(event, context=None)
+    assert [r["outcome"] for r in result["results"]] == ["quarantined"]
