@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------
+# Secrets & credentials -- NEVER commit (see CLAUDE.md > Security)
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.env
+
+# AWS credentials / config if ever copied into the repo
+.aws/
+credentials
+*credentials*
+*_accessKeys.csv
+*accessKeys*.csv
+*_credentials.csv
+
+# Keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ---------------------------------------------------------------
+# Local data -- source zips, extracted CSVs, Parquet output
+# ---------------------------------------------------------------
+data/
+*.zip
+*.parquet
+
+# DuckDB databases
+*.duckdb
+*.duckdb.wal
+*.db
+
+# ---------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------
+# dbt
+# ---------------------------------------------------------------
+target/
+dbt_packages/
+logs/
+profiles.yml
+
+# ---------------------------------------------------------------
+# Terraform / CDK (later)
+# ---------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+cdk.out/
+
+# ---------------------------------------------------------------
+# Editor / OS
+# ---------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
