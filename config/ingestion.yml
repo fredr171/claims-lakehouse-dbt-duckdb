@@ -1,0 +1,19 @@
+# Global ingestion settings (landing -> raw). See CLAUDE.md > Ingestion rules.
+region: us-east-2
+landing_bucket: fredr-claims-landing-2026
+raw_bucket: fredr-claims-raw-2026
+
+# Prefixes. Each must end with "/".
+landing_prefix: cms/desynpuf/      # only zips directly under <landing_prefix><file_type>/ are processed
+archive_prefix: archive/           # in the landing bucket; mirrors the original key
+quarantine_prefix: quarantine/     # in the landing bucket; mirrors the original key
+manifest_prefix: _manifests/       # in the raw bucket; one <sha256>.json per processed zip
+
+# Defaults; a file type may override any of these under its own `limits:` key.
+default_limits:
+  max_zip_bytes: 536870912            # 512 MiB
+  max_uncompressed_bytes: 4294967296  # 4 GiB
+  max_compression_ratio: 100          # zip bombs run in the 1000s; real CSVs are ~5-15
+
+# Rows per Arrow record batch when writing Parquet (bounds memory use).
+parquet_batch_rows: 50000
