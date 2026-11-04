@@ -88,6 +88,35 @@ python -m venv .venv
 JSON-lines logs go to stderr, and a JSON summary of manifest records goes to stdout. Exit codes:
 `0` all success/skipped, `2` something was quarantined, `1` an error occurred.
 
+## Quarantine notifications (GitHub issues)
+
+A decoupled notifier turns each quarantine report (`quarantine/.../<zip>.zip.error.json`) into
+a GitHub issue. Ingestion doesn't change, and a GitHub outage can't affect loading or quarantine.
+
+- **One issue per checksum.** Before opening an issue it looks for an *open* `quarantine` issue
+  whose body has the line ``Checksum: `<sha256>` ``. The lookup uses the Issues list endpoint, not
+  search, which lags. If it finds one, it adds a "quarantined again" comment instead.
+- **Ticket record:** `s3://fredr-claims-raw-2026/_tickets/<sha256>.json` stores the issue URL and
+  number and every batch already notified. It's kept apart from the manifest, which only
+  ingestion writes. Re-running for the same event makes no API calls.
+- **Public-safe content.** Issues carry check names, counts, line numbers, column names, and file
+  metadata. Row values are redacted, for example when a headerless file's first data row would be
+  read as column names. Details are truncated and rendered as code so they can't @mention anyone.
+- **Resilient.** It retries 5xx/429/rate-limited responses with backoff, honoring `Retry-After` and
+  `x-ratelimit-reset`. It never logs the token. Failures exit non-zero, and `--scan` retries later.
+- **Configurable:** labels, title template, and per-check next steps live in
+  `config/notifications.yml`. Moving to Jira would only replace `github_client.py`.
+
+```bash
+cp .env.example .env    # then set GITHUB_TOKEN (fine-grained, this repo only, Issues: read/write)
+.venv/Scripts/python -m claims_etl.notifications.cli --scan
+.venv/Scripts/python -m claims_etl.notifications.cli --error-key quarantine/cms/desynpuf/<type>/<zip>.zip.error.json
+```
+
+A Lambda handler stub (`claims_etl.notifications.lambda_handler`) exists for an S3 trigger on
+`quarantine/*.error.json`. It isn't deployed yet; before deploying, settings move to SSM
+Parameter Store and `requests` gets bundled into the package.
+
 ## Automatic ingestion (AWS Lambda)
 
 Uploading a `.zip` under `s3://fredr-claims-landing-2026/cms/desynpuf/` triggers the
@@ -118,7 +147,7 @@ Terraform state is local (gitignored). Move it to an S3 backend before CI or any
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 101 tests, no AWS access (S3 is mocked with moto)
+.venv/Scripts/python -m pytest      # 143 tests; no AWS or GitHub access (moto + responses)
 .venv/Scripts/python -m ruff check src tests
 ```
 
@@ -148,6 +177,12 @@ src/claims_etl/ingestion/
   s3_store.py               the only boto3 code (download, upload, move = copy→verify→delete)
   manifest.py               idempotency records
   cli.py / lambda_handler.py
+src/claims_etl/notifications/
+  notifier.py               notify_quarantine: create issue or comment, record result
+  content.py                title/body/comment + sanitizing (no tracker dependency)
+  github_client.py          GitHub REST: list/create/comment/labels, retries
+  ticket_record.py          _tickets/<sha256>.json
+  settings.py               get_setting(): env now, SSM later
 scripts/build_lambda.py     Lambda deployment package
 infra/terraform/            Lambda, IAM role, log group, S3 trigger
 tests/

@@ -80,6 +80,11 @@ def write_test_config(config_dir: Path) -> Path:
     (config_dir / "file_types" / "beneficiary_summary.yml").write_text(
         yaml.safe_dump(file_type), encoding="utf-8"
     )
+    # Notifier settings are used unchanged from the real config.
+    real_notifications = Path(__file__).resolve().parents[1] / "config/notifications.yml"
+    (config_dir / "notifications.yml").write_text(
+        real_notifications.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     return config_dir
 
 

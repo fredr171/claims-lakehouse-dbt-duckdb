@@ -30,6 +30,9 @@ clarity, tests, and documentation matter as much as working output.
 - Flow: zip lands in landing -> Python ingestion extracts CSV, adds metadata,
   writes Parquet to raw -> dbt + DuckDB reads raw from S3, builds staging,
   intermediate, and marts -> marts published back to S3
+- Side flow (decoupled): ingestion quarantines a zip and writes `<zip>.error.json`
+  -> quarantine notifier reads it and opens/updates a GitHub issue. Ticketing
+  failures never affect ingestion or quarantine.
 - Ingestion runs in AWS Lambda `claims-etl-ingest`, triggered by S3 uploads under
   landing cms/desynpuf/ (*.zip); the CLI runs the same process_zip locally.
 - Infra changes go through Terraform (infra/terraform), never the console. Rebuild
@@ -46,7 +49,8 @@ Partitions use Hive style (key=value).
 landing: cms/desynpuf/<file_type>/<original_zip_name>.zip
 raw:     cms/desynpuf/<file_type>/year=<yyyy>/sample=<n>/part-0.parquet   (beneficiary_summary)
          cms/desynpuf/<file_type>/sample=<n>/part-0.parquet               (claims files span 2008–2010)
-         _manifests/<sha256>.json   (one record per processed zip)
+         _manifests/<sha256>.json   (one record per processed zip; written only by ingestion)
+         _tickets/<sha256>.json     (quarantine ticket record; written only by the notifier)
 landing archive/quarantine mirror the original key:
          archive/cms/desynpuf/<file_type>/<original_zip_name>.zip
          quarantine/cms/desynpuf/<file_type>/<original_zip_name>.zip
@@ -132,7 +136,7 @@ type should only require a new config file.
 
 - Core: `process_zip(s3_key)`
 - CLI: `--key <s3_key>` (one file) or `--scan` (all unprocessed zips under `cms/desynpuf/`)
-- Lambda handler stub that parses an S3 event and calls `process_zip` (not deployed yet)
+- Lambda handler that parses an S3 event and calls `process_zip` (deployed as `claims-etl-ingest`)
 
 ### Tests
 
@@ -144,6 +148,66 @@ file, missing key, path traversal entry). Unit tests must never touch real S3.
 
 - Ask before any S3 write, copy, or delete outside the planned flow.
 - Keep data/ and any downloaded files out of git.
+
+## Quarantine notifications (quarantine -> GitHub issue)
+
+Decoupled from ingestion: ingestion is unchanged and only writes
+`quarantine/.../<zip_name>.error.json` in fredr-claims-landing-2026. A separate
+notifier turns that file into a GitHub issue. If ticketing fails, ingestion and
+quarantine are unaffected; the notifier logs the error, exits non-zero, and is
+retried later (`--scan`).
+
+### Flow: notify_quarantine(error_json_key)
+
+1. Read the `.error.json` from S3.
+2. Look for an existing OPEN issue for the same checksum using the Issues list
+   endpoint (`GET /repos/{owner}/{repo}/issues?labels=quarantine&state=open`,
+   paginated), NOT the search API (search has an indexing delay that would
+   cause duplicate tickets). Match on the body line ``Checksum: `<sha256>` ``.
+3. Found -> add a comment (quarantined again: timestamp, batch ID, failed check).
+   Not found -> create a new issue.
+4. Record the result in `s3://fredr-claims-raw-2026/_tickets/<sha256>.json`
+   (ticket_url, ticket_number, notified batch IDs). NOT in the manifest: ingestion
+   writes the manifest after the `.error.json`, so a notifier write there could be
+   overwritten (race), and the manifest must keep a single writer.
+   A batch ID already in the record -> `already_notified`, no API calls.
+
+### Issue content
+
+- Title: `[Quarantine] <file_type> <year> sample <n>: <failed_check>`
+- Body (markdown): source URI, quarantine location, ``Checksum: `<sha256>` ``,
+  failed check name + details, batch ID, UTC timestamp, suggested next steps
+  for that check, link/path to the `.error.json`.
+- Labels: `quarantine`, `data-quality`, `<file_type>`; missing labels are created.
+- The repo is PUBLIC: never put row-level data values in issues. Only check
+  names, counts, line numbers, column names, and file metadata. Truncate long details.
+  Details are sanitized, not trusted: csv_utf8 byte values are stripped, header
+  "columns" that are not identifiers (e.g. a data row read as a header) are
+  redacted, and values are wrapped in code spans (no @mentions or markdown injection).
+
+### GitHub API and settings
+
+- REST API via `requests`; no SDK. Retry with backoff on 5xx and rate limits,
+  honoring `Retry-After` / `x-ratelimit-*` headers. Never log the token.
+- `GITHUB_TOKEN`, `GITHUB_REPO` (owner/name) via `get_setting()`: environment
+  (from a gitignored `.env` locally via python-dotenv); later SSM Parameter
+  Store in Lambda, as a one-line swap. Placeholders live in committed `.env.example`.
+- Ticketing config (labels, title template, per-check next steps) in
+  `config/notifications.yml`; switching to Jira later changes only the client.
+
+### Entry points
+
+- CLI: `--error-key <s3_key>` (one file) or `--scan` (every `.error.json` under
+  `quarantine/` not yet ticketed; this is the retry mechanism).
+- Lambda handler stub for S3 ObjectCreated (prefix `quarantine/`, suffix
+  `.error.json`); not deployed yet.
+
+### Tests
+
+Mock GitHub (responses) and S3 (moto); never hit real GitHub or S3. Cover: new
+issue (title/body/labels), duplicate checksum -> comment only, missing labels
+created, 5xx -> retries then clean failure, truncation + no row-level values,
+ticket result recorded.
 
 ## Tech stack
 
@@ -172,9 +236,15 @@ file, missing key, path traversal entry). Unit tests must never touch real S3.
 - [x] Buckets: landing, raw, marts (us-east-2, Block Public Access, SSE-S3 verified)
 - [x] AWS CLI v2 installed and configured (IAM user fredr-admin, default profile)
 - [x] Ingestion script: beneficiary_summary 2008 (116,352 rows to raw, reconciled 2026-11-02)
-- [ ] Ingest beneficiary_summary 2009, 2010; then inpatient/outpatient claims (new configs)
+- [ ] Ingest beneficiary_summary 2010 (2009 done); then inpatient/outpatient claims (new configs)
 - [x] Lambda `claims-etl-ingest` deployed via Terraform (infra/terraform, local state),
       S3 trigger on landing cms/desynpuf/*.zip; pyarrow from AWSSDKPandas-Python313 layer
-- [ ] End-to-end test of the S3 trigger with a real upload (e.g. 2009 beneficiary)
+- [x] End-to-end test of the S3 trigger: 2009 beneficiary (114,538 rows) loaded by
+      Lambda; blind-test ragged-row file quarantined at csv_field_counts (2026-11-04)
+- [x] Quarantine notifier (GitHub issues), see "Quarantine notifications". Live-tested
+      2026-11-04: issue #1 created, re-delivery commented (kept open as a demo; its
+      quarantine objects and _tickets/bf0b177d….json are intentionally kept)
+- [ ] Deploy notifier Lambda (S3 trigger quarantine/*.error.json): switch get_setting
+      to SSM, store token in SSM, bundle `requests`. GitHub token expires 2027-02-02
 - [ ] Move Terraform state to an S3 backend before CI
 - [ ] dbt project setup

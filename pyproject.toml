@@ -12,18 +12,22 @@ dependencies = [
     "boto3>=1.35",
     "pyarrow>=17",
     "pyyaml>=6",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "moto[s3]>=5",
+    "responses>=0.25",
     "ruff>=0.6",
     "tzdata; sys_platform == 'win32'",  # pyarrow needs it to read tz-aware timestamps on Windows
 ]
 
 [project.scripts]
 claims-ingest = "claims_etl.ingestion.cli:main"
+claims-notify = "claims_etl.notifications.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

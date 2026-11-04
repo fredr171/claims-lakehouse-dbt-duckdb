@@ -1,0 +1,75 @@
+# Quarantine notifications: quarantine/<...>.zip.error.json -> ticket.
+# Tracker-agnostic on purpose: switching GitHub -> Jira changes only the client.
+# Bucket names and the quarantine prefix come from ingestion.yml.
+
+error_json_suffix: .zip.error.json
+ticket_prefix: _tickets/          # in the raw bucket; one <sha256>.json per quarantined checksum
+
+labels:
+  base: [quarantine, data-quality]   # the file type is added per ticket
+  match: quarantine                  # label used to look up existing OPEN tickets
+  default_color: c5def5
+  colors:
+    quarantine: d73a4a
+    data-quality: fbca04
+  descriptions:
+    quarantine: File quarantined by claims-etl ingestion
+    data-quality: Data delivery failed a validation check
+    default: "claims-etl file type"
+
+# Placeholders: file_type, year, sample, zip_name, failed_check
+title_template: "[Quarantine] {file_type} {year} sample {sample}: {failed_check}"
+title_template_no_partition: "[Quarantine] {file_type} {zip_name}: {failed_check}"
+max_title_chars: 200
+max_details_chars: 500
+
+# Placeholder: file_type. One entry per ingestion check, plus a default.
+next_steps:
+  known_file_type: >-
+    Upload under cms/desynpuf/<file_type>/ using a folder that has a config in
+    config/file_types/, or add config/file_types/<file_type>.yml for a new type.
+  file_name: >-
+    Rename the zip to match zip_name_regex in config/file_types/{file_type}.yml
+    (e.g. remove a numeric download-ID prefix) and re-upload.
+  file_size: >-
+    The zip is empty or above max_zip_bytes. Re-download it; if the size is
+    genuine, raise the limit in config/file_types/{file_type}.yml.
+  zip_opens: >-
+    The file is not a readable zip (truncated download or wrong file).
+    Re-download from the source and re-upload.
+  member_paths: >-
+    The archive has unsafe entries (absolute paths, '..' or nested archives).
+    Do not extract it manually; request a clean delivery.
+  expected_member: >-
+    The zip must contain exactly one CSV named per csv_member_template in
+    config/file_types/{file_type}.yml. Check for extra files or a renamed CSV.
+  uncompressed_size: >-
+    The unpacked size exceeds max_uncompressed_bytes. Confirm the file is genuine
+    before raising the limit in config/file_types/{file_type}.yml.
+  compression_ratio: >-
+    The compression ratio looks like a zip bomb. Do not open it; request a new delivery.
+  zip_crc: >-
+    Archive data is corrupt (CRC mismatch). Re-download and re-upload.
+  csv_utf8: >-
+    The CSV is not valid UTF-8. Check the source encoding (e.g. Latin-1) at the
+    reported position and request a UTF-8 file.
+  csv_parseable: >-
+    Malformed quoting at the reported line. Inspect that line locally for stray
+    or unbalanced double quotes.
+  csv_header: >-
+    Compare the file header with expected_columns in config/file_types/{file_type}.yml.
+    If the source schema changed intentionally, update the config.
+  csv_field_counts: >-
+    Inspect the reported line numbers for missing or extra delimiters and
+    request a corrected file.
+  csv_row_count: >-
+    The CSV has a header but no data rows. Confirm the export completed upstream.
+  csv_key_columns: >-
+    Key column values are empty at the reported lines. Request a corrected file;
+    rows without keys cannot be joined downstream.
+  row_count_reconciliation: >-
+    CSV and Parquet row counts differ, which indicates an ingestion bug rather
+    than bad data. Re-run ingestion locally with --key and investigate.
+  default: >-
+    Review the .error.json report linked above and the check in
+    src/claims_etl/ingestion/checks.py.
