@@ -190,8 +190,9 @@ retried later (`--scan`).
 - REST API via `requests`; no SDK. Retry with backoff on 5xx and rate limits,
   honoring `Retry-After` / `x-ratelimit-*` headers. Never log the token.
 - `GITHUB_TOKEN`, `GITHUB_REPO` (owner/name) via `get_setting()`: environment
-  (from a gitignored `.env` locally via python-dotenv); later SSM Parameter
-  Store in Lambda, as a one-line swap. Placeholders live in committed `.env.example`.
+  (from a gitignored `.env` locally via python-dotenv), or SSM Parameter Store
+  (`/claims-etl/<NAME>`) when CLAIMS_ETL_SETTINGS_SOURCE=ssm, as in Lambda.
+  Placeholders live in committed `.env.example`.
 - Ticketing config (labels, title template, per-check next steps) in
   `config/notifications.yml`; switching to Jira later changes only the client.
 
@@ -215,10 +216,10 @@ ticket result recorded.
 
 ## Tech stack
 
-- Python 3, standard library zipfile, DuckDB (and/or pyarrow), boto3
-- dbt-duckdb for transformations
-- pytest for tests
-- Later: Terraform or AWS CDK for infrastructure, GitHub Actions for scheduling
+- Python 3 (3.13 in Lambda), standard library zipfile, pyarrow, boto3, requests
+- AWS Lambda + S3 event triggers; Terraform for infrastructure (infra/terraform)
+- pytest with moto (S3/SSM) and responses (GitHub); ruff for lint/format
+- Next: dbt-duckdb for transformations; later GitHub Actions for CI/scheduling
 
 ## Security
 

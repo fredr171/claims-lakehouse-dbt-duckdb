@@ -1,10 +1,12 @@
 """process_zip: the landing -> raw flow for one zip (see CLAUDE.md > Ingestion flow).
 
-1. Download, SHA-256.            -> already loaded? skipped_duplicate, archive.
-2. Validate.                     -> failure? quarantine + .error.json.
-3. Write Parquet locally.
-4. Reconcile row counts.         -> mismatch? quarantine.
-5. Upload to raw, write manifest, archive the zip.
+1. Triggered with a landing key (Lambda S3 event or the CLI).
+2. Download, SHA-256.            -> already loaded? skipped_duplicate, archive.
+3. Validate.                     -> failure? quarantine + .error.json.
+4. Write Parquet locally.
+5. Reconcile row counts.         -> mismatch? quarantine.
+6. Upload to raw (deterministic part-0.parquet, so re-runs overwrite).
+7. Write the manifest, archive the zip.
 
 Data problems end in ``quarantined``. Infrastructure problems (S3, network,
 disk) end in ``error`` and leave the zip where it is, so a re-run retries it.
@@ -99,7 +101,7 @@ def _run(
         logger, "zip_downloaded", key=s3_key, sha256=record.checksum, bytes=local_zip.stat().st_size
     )
 
-    # Step 2: idempotency
+    # Step 2: idempotency (download + checksum above)
     existing = manifest.load_manifest(store, config, record.checksum)
     if manifest.is_successful(existing):
         assert existing is not None

@@ -16,6 +16,7 @@ data "aws_s3_bucket" "raw" {
 locals {
   landing_arn = data.aws_s3_bucket.landing.arn
   raw_arn     = data.aws_s3_bucket.raw.arn
+  ingest_tags = { Component = "ingestion" }
 }
 
 # --- Logs --------------------------------------------------------------------
@@ -23,6 +24,7 @@ locals {
 resource "aws_cloudwatch_log_group" "ingest" {
   name              = "/aws/lambda/${var.function_name}"
   retention_in_days = var.log_retention_days
+  tags              = local.ingest_tags
 }
 
 # --- IAM: least privilege, scoped to the prefixes the pipeline touches --------
@@ -40,6 +42,7 @@ data "aws_iam_policy_document" "assume_lambda" {
 resource "aws_iam_role" "ingest" {
   name               = "${var.function_name}-role"
   assume_role_policy = data.aws_iam_policy_document.assume_lambda.json
+  tags               = local.ingest_tags
 }
 
 data "aws_iam_policy_document" "ingest" {
@@ -102,6 +105,7 @@ resource "aws_lambda_function" "ingest" {
   layers           = [var.pandas_layer_arn]
   memory_size      = var.memory_mb
   timeout          = var.timeout_seconds
+  tags             = local.ingest_tags
 
   ephemeral_storage {
     size = var.ephemeral_storage_mb

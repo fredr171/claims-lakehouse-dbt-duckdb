@@ -9,6 +9,7 @@ without any API call, which makes ``--scan`` a safe retry.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -35,7 +36,7 @@ class TicketClient(Protocol):
 
     repo: str
 
-    def list_open_tickets(self, label: str): ...  # -> Iterable[Ticket]
+    def list_open_tickets(self, label: str) -> Iterable[Ticket]: ...
     def ensure_labels(self, labels: list[LabelSpec]) -> list[str]: ...
     def create_ticket(self, title: str, body: str, labels: list[str]) -> Ticket: ...
     def add_comment(self, ticket: Ticket, body: str) -> str: ...

@@ -10,6 +10,7 @@ locals {
   github_token_param   = "${local.ssm_prefix}GITHUB_TOKEN"
   github_repo_param    = "${local.ssm_prefix}GITHUB_REPO"
   notifier_name        = "${var.function_name_prefix}-notify"
+  notify_tags          = { Component = "notifier" }
   ssm_param_arn_prefix = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter"
 }
 
@@ -18,16 +19,19 @@ resource "aws_ssm_parameter" "github_repo" {
   description = "owner/name of the repo that receives quarantine issues"
   type        = "String"
   value       = var.github_repo
+  tags        = local.notify_tags
 }
 
 resource "aws_cloudwatch_log_group" "notify" {
   name              = "/aws/lambda/${local.notifier_name}"
   retention_in_days = var.log_retention_days
+  tags              = local.notify_tags
 }
 
 resource "aws_iam_role" "notify" {
   name               = "${local.notifier_name}-role"
   assume_role_policy = data.aws_iam_policy_document.assume_lambda.json
+  tags               = local.notify_tags
 }
 
 data "aws_iam_policy_document" "notify" {
@@ -97,6 +101,7 @@ resource "aws_lambda_function" "notify" {
   # Must exceed GitHubClient's worst case (4 attempts x 15 s request timeout,
   # plus up to 3 waits of <= 60 s), so rate limits end in a clean TicketingError.
   timeout = 300
+  tags    = local.notify_tags
 
   environment {
     variables = {

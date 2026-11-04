@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "claims-etl"
 version = "0.1.0"
-description = "Landing -> raw ingestion for CMS DE-SynPUF synthetic Medicare claims"
+description = "Landing -> raw ingestion and quarantine notifications for CMS DE-SynPUF synthetic Medicare claims"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

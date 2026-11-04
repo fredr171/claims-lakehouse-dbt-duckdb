@@ -262,10 +262,10 @@ def test_cli_reports_missing_token(s3, config_dir, monkeypatch, capsys) -> None:
     assert "GITHUB_TOKEN is not set" in capsys.readouterr().err
 
 
-# --- Lambda stub + settings ------------------------------------------------------------
+# --- Lambda handler + settings ----------------------------------------------------------
 
 
-def test_lambda_stub_ignores_non_report_keys(config_dir, monkeypatch) -> None:
+def test_lambda_handler_ignores_non_report_keys(config_dir, monkeypatch) -> None:
     monkeypatch.setenv("CLAIMS_ETL_CONFIG_DIR", str(config_dir))
     event = {
         "Records": [

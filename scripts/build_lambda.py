@@ -1,8 +1,10 @@
-"""Build build/lambda.zip for the ingestion Lambda.
+"""Build build/lambda.zip, the one package shared by both Lambda functions.
 
-Contents: the claims_etl package, the config/ folder, and PyYAML + requests
-installed for the Lambda platform (Linux x86_64, CPython 3.13). pyarrow and numpy come from
-the AWS SDK for pandas layer; boto3 comes from the Lambda runtime.
+claims-etl-ingest and claims-etl-notify deploy the same zip with different
+handlers. Contents: the claims_etl package, the config/ folder, and PyYAML +
+requests installed for the Lambda platform (Linux x86_64, CPython 3.13).
+boto3 comes from the Lambda runtime. pyarrow and numpy come from the AWS SDK
+for pandas layer, which only the ingestion function attaches.
 
 The zip is deterministic (sorted entries, fixed timestamps), so rebuilding
 unchanged code yields the same hash and Terraform does not redeploy.

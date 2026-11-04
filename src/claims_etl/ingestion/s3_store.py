@@ -27,7 +27,7 @@ class S3VerificationError(RuntimeError):
 
 
 class S3Store:
-    """S3 operations used by the ingestion pipeline."""
+    """S3 operations used by ingestion and the quarantine notifier."""
 
     def __init__(self, client: Any) -> None:
         self._client = client

@@ -138,11 +138,12 @@ Uploading a `.zip` under `s3://fredr-claims-landing-2026/cms/desynpuf/` triggers
 |---|---|
 | Lambda `claims-etl-ingest` | Python 3.13, 1024 MB, 300 s timeout, 2 GB `/tmp` |
 | pyarrow | AWS SDK for pandas public layer (`AWSSDKPandas-Python313:17`, pyarrow 24) |
-| Package | `build/lambda.zip`: our code, `config/`, PyYAML (~0.8 MB, deterministic) |
+| Package | `build/lambda.zip`: our code, `config/`, PyYAML, requests (~1.6 MB, deterministic; shared with the notifier) |
 | IAM role | Least privilege: read/delete `cms/desynpuf/*`, write `archive/*` and `quarantine/*` in landing, write `cms/desynpuf/*` and `_manifests/*` in raw, own log group only |
 | Trigger | S3 `ObjectCreated`, prefix `cms/desynpuf/`, suffix `.zip` (archive/quarantine moves can't re-trigger) |
 | Retries | An `error` outcome raises, so Lambda retries async invocations twice. `quarantined` is final and not retried |
 | Logs | `/aws/lambda/claims-etl-ingest`, JSON lines, 30-day retention |
+| Notifier | `claims-etl-notify` (`notifier.tf`): 256 MB, 300 s timeout, same package without the pandas layer; trigger `quarantine/*.error.json` |
 
 Deploy or update:
 
@@ -158,7 +159,7 @@ Terraform state is local (gitignored). Move it to an S3 backend before CI or any
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 145 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest      # 146 tests; no AWS or GitHub access (moto + responses)
 .venv/Scripts/python -m ruff check src tests
 ```
 
@@ -166,19 +167,25 @@ Fixture zips are built at test time, including deliberately broken ones: bad nam
 truncated zip, CRC mismatch, path traversal, nested archive, zip bomb, wrong/reordered header,
 ragged row, header only, empty key, non-UTF-8 bytes.
 
-## First load (2008 beneficiary summary, Sample 1)
+## Loaded so far (beneficiary summary, Sample 1)
 
-| | |
-|---|---|
-| Source | `DE1_0_2008_Beneficiary_Summary_File_Sample_1.zip`, 3.1 MB, SHA-256 `2b0c9cbf…3d70b18b` |
-| CSV | 116,352 data rows × 32 columns, ASCII, CRLF |
-| Raw | `year=2008/sample=1/part-0.parquet`, 4.2 MB, 116,352 rows × 38 columns |
-| Reconciliation | CSV 116,352 = Parquet 116,352; `_source_row_number` 2–116,353 |
+Loaded by the Lambda into a freshly emptied landing bucket on 2026-11-04. Every file
+reconciled (CSV data rows = Parquet rows) before upload. Raw files have 38 columns:
+32 source columns + 6 metadata columns. The CSVs are ASCII with CRLF line endings.
+
+| Year | Zip SHA-256 | CSV rows = Parquet rows | Raw file |
+|---|---|---|---|
+| 2008 | `2b0c9cbf…3d70b18b` | 116,352 | `year=2008/sample=1/part-0.parquet`, 4.2 MB |
+| 2009 | `dff18533…880bb379` | 114,538 | `year=2009/sample=1/part-0.parquet`, 4.2 MB |
+| 2010 | `b28b8ac7…7dc1fdff` | 112,754 | `year=2010/sample=1/part-0.parquet`, 4.0 MB |
+
+The same run quarantined two deliberately broken practice files (at `csv_header` and
+`expected_member`). Each opened a GitHub issue automatically.
 
 ## Project layout
 
 ```
-config/                     ingestion.yml + file_types/*.yml
+config/                     ingestion.yml, notifications.yml, file_types/*.yml
 src/claims_etl/ingestion/
   pipeline.py               process_zip orchestration
   validation.py             runs checks in order
@@ -187,14 +194,19 @@ src/claims_etl/ingestion/
   parquet_writer.py         CSV → Parquet (string columns + metadata)
   s3_store.py               the only boto3 code (download, upload, move = copy→verify→delete)
   manifest.py               idempotency records
+  log.py / utils.py          JSON-lines logging, checksum and time helpers (shared)
   cli.py / lambda_handler.py
+src/claims_etl/s3_events.py S3 event parsing shared by both handlers (no pyarrow)
 src/claims_etl/notifications/
   notifier.py               notify_quarantine: create issue or comment, record result
   content.py                title/body/comment + sanitizing (no tracker dependency)
   github_client.py          GitHub REST: list/create/comment/labels, retries
   ticket_record.py          _tickets/<sha256>.json
-  settings.py               get_setting(): env now, SSM later
-scripts/build_lambda.py     Lambda deployment package
-infra/terraform/            Lambda, IAM role, log group, S3 trigger
+  report.py                 typed, validated view of an .error.json
+  config.py                 notifications.yml (labels, title templates, next steps)
+  settings.py               get_setting(): env locally, SSM in Lambda
+  cli.py / lambda_handler.py
+scripts/build_lambda.py     Lambda deployment package (shared by both functions)
+infra/terraform/            main.tf (ingestion), notifier.tf, S3 triggers, IAM, logs, SSM
 tests/
 ```
