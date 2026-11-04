@@ -94,7 +94,9 @@ resource "aws_lambda_function" "notify" {
   filename         = var.lambda_zip_path # same package as ingestion; no pandas layer needed
   source_code_hash = filebase64sha256(var.lambda_zip_path)
   memory_size      = 256
-  timeout          = 60
+  # Must exceed GitHubClient's worst case (4 attempts x 15 s request timeout,
+  # plus up to 3 waits of <= 60 s), so rate limits end in a clean TicketingError.
+  timeout = 300
 
   environment {
     variables = {

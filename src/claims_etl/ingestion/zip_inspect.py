@@ -10,7 +10,6 @@ from __future__ import annotations
 import csv
 import io
 import re
-import zipfile
 from collections.abc import Iterator
 from typing import IO
 
@@ -18,11 +17,6 @@ from claims_etl.ingestion.models import CsvProfile
 
 NESTED_ARCHIVE_SUFFIXES = (".zip", ".gz", ".tgz", ".tar", ".bz2", ".xz", ".7z", ".rar", ".zst")
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
-
-
-def file_members(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
-    """All non-directory entries in the archive."""
-    return [info for info in zf.infolist() if not info.is_dir()]
 
 
 def unsafe_member_reason(name: str) -> str | None:

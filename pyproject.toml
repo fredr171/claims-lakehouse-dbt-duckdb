@@ -19,7 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
-    "moto[s3]>=5",
+    "moto[s3,ssm]>=5",
     "responses>=0.25",
     "ruff>=0.6",
     "tzdata; sys_platform == 'win32'",  # pyarrow needs it to read tz-aware timestamps on Windows

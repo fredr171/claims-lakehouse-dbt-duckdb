@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
 from claims_etl.ingestion import checks
+from claims_etl.ingestion.config import load_config
 
-BENE_REGEX = re.compile(
-    r"^DE1_0_(?P<year>\d{4})_Beneficiary_Summary_File_Sample_(?P<sample>\d+)\.zip$"
-)
+# The real rule from config/file_types/beneficiary_summary.yml, not a copy, so
+# these names are tested against exactly what ingestion enforces.
+BENE_REGEX = load_config().file_types["beneficiary_summary"].zip_name_regex
 
 
 def test_known_file_type_passes() -> None:
@@ -27,10 +26,15 @@ def test_unparseable_key_fails_file_type() -> None:
     assert not checks.check_known_file_type(None, {"beneficiary_summary"}).passed
 
 
-def test_file_name_matches() -> None:
-    assert checks.check_file_name(
-        "DE1_0_2010_Beneficiary_Summary_File_Sample_20.zip", BENE_REGEX
-    ).passed
+@pytest.mark.parametrize(
+    "good_name",
+    [
+        "DE1_0_2008_Beneficiary_Summary_File_Sample_1.zip",
+        "DE1_0_2010_Beneficiary_Summary_File_Sample_20.zip",
+    ],
+)
+def test_file_name_matches(good_name: str) -> None:
+    assert checks.check_file_name(good_name, BENE_REGEX).passed
 
 
 @pytest.mark.parametrize(
