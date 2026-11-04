@@ -24,6 +24,7 @@ credentials
 # Local data -- source zips, extracted CSVs, Parquet output
 # ---------------------------------------------------------------
 data/
+test_files/
 *.zip
 *.parquet
 

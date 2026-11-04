@@ -1,8 +1,8 @@
 """Secret/setting lookup behind one function, so the backing store can change.
 
-Today settings come from environment variables (filled from a gitignored .env
-by the CLI). In Lambda they will come from SSM Parameter Store; the switch is
-the single ``_lookup = ...`` line below. Values are never logged.
+Locally, settings come from environment variables (filled from a gitignored
+.env by the CLI). In Lambda, CLAIMS_ETL_SETTINGS_SOURCE=ssm selects SSM
+Parameter Store (/claims-etl/<NAME>). Values are never logged.
 """
 
 from __future__ import annotations
@@ -40,8 +40,15 @@ def ssm_setting(name: str) -> str | None:
     return response["Parameter"]["Value"]
 
 
-# Swap to `ssm_setting` when the notifier runs in Lambda.
-_lookup: Callable[[str], str | None] = env_setting
+SOURCE_ENV_VAR = "CLAIMS_ETL_SETTINGS_SOURCE"  # "ssm" in Lambda (set by Terraform)
+
+
+def _select_lookup() -> Callable[[str], str | None]:
+    """SSM when CLAIMS_ETL_SETTINGS_SOURCE=ssm, else environment variables."""
+    return ssm_setting if os.environ.get(SOURCE_ENV_VAR, "").lower() == "ssm" else env_setting
+
+
+_lookup: Callable[[str], str | None] = _select_lookup()
 
 
 def get_setting(name: str) -> str:

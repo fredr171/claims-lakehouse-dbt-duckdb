@@ -181,9 +181,16 @@ def test_headerless_file_issue_contains_no_row_values(
     assert issue["title"].endswith(": csv_header")  # failed where we expect, not elsewhere
     error_json = s3.get_json(LANDING_BUCKET, ERROR_KEY)
     assert VALID_ROWS[0][0] in error_json["failure_details"]  # the private report HAS the value
+    body = issue["body"]
+    # ...but the public issue does not. Distinctive values must appear nowhere; short
+    # ones like "05" can occur by chance in UUIDs/timestamps, so for those check the
+    # details section, which is the only place check output is rendered.
+    details_section = body.split("## Failed check:", 1)[1].split("## Suggested next steps", 1)[0]
     for value in VALID_ROWS[0]:
-        assert value not in issue["body"]  # ...but the public issue does not
-    assert "3 non-identifier value(s) redacted" in issue["body"]
+        assert value not in details_section
+        if len(value) >= 8:
+            assert value not in body
+    assert "3 non-identifier value(s) redacted" in details_section
 
 
 def test_github_outage_fails_cleanly_and_ingestion_is_unaffected(
@@ -298,3 +305,22 @@ def test_ssm_setting_reads_secure_string(monkeypatch) -> None:
         assert settings.ssm_setting("GITHUB_REPO") == REPO
         assert settings.ssm_setting("NOT_THERE") is None
     settings._ssm_client.cache_clear()
+
+
+def test_settings_source_switches_to_ssm(monkeypatch) -> None:
+    monkeypatch.setenv(settings.SOURCE_ENV_VAR, "ssm")
+    assert settings._select_lookup() is settings.ssm_setting
+    monkeypatch.delenv(settings.SOURCE_ENV_VAR)
+    assert settings._select_lookup() is settings.env_setting
+
+
+def test_notifier_lambda_does_not_import_pyarrow() -> None:
+    """The notifier function has no pandas layer, so pyarrow must never be imported."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, claims_etl.notifications.lambda_handler; "
+        "sys.exit(1 if 'pyarrow' in sys.modules else 0)"
+    )
+    assert subprocess.run([sys.executable, "-c", code]).returncode == 0

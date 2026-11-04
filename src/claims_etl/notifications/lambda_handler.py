@@ -1,9 +1,9 @@
-"""AWS Lambda entry point for quarantine notifications (stub, NOT deployed yet).
+"""AWS Lambda entry point for quarantine notifications (deployed by infra/terraform).
 
-Intended trigger: S3 ObjectCreated on the landing bucket, prefix quarantine/,
-suffix .error.json. Before deploying: switch settings._lookup to ssm_setting,
-store GITHUB_TOKEN / GITHUB_REPO in SSM under /claims-etl/, and bundle
-`requests` in the package (it is not in the Lambda runtime).
+Trigger: S3 ObjectCreated on the landing bucket, prefix quarantine/, suffix
+.error.json. Settings come from SSM (/claims-etl/GITHUB_TOKEN, GITHUB_REPO)
+because Terraform sets CLAIMS_ETL_SETTINGS_SOURCE=ssm. This module must not
+import pyarrow: the notifier function has no pandas layer.
 """
 
 from __future__ import annotations
@@ -11,10 +11,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from claims_etl.ingestion.lambda_handler import parse_s3_event
 from claims_etl.ingestion.log import configure_logging, log_event
 from claims_etl.notifications.config import load_notification_config
 from claims_etl.notifications.notifier import notify_quarantine
+from claims_etl.s3_events import parse_s3_event
 
 logger = logging.getLogger(__name__)
 

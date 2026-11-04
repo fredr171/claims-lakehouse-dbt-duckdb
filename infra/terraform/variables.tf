@@ -28,6 +28,18 @@ variable "function_name" {
   default     = "claims-etl-ingest"
 }
 
+variable "function_name_prefix" {
+  description = "Prefix for functions other than ingestion (e.g. <prefix>-notify)."
+  type        = string
+  default     = "claims-etl"
+}
+
+variable "github_repo" {
+  description = "owner/name of the repo that receives quarantine issues (stored in SSM)."
+  type        = string
+  default     = "fredr171/claims-lakehouse-dbt-duckdb"
+}
+
 variable "lambda_zip_path" {
   description = "Deployment package built by scripts/build_lambda.py."
   type        = string

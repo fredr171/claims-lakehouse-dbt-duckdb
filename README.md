@@ -113,9 +113,20 @@ cp .env.example .env    # then set GITHUB_TOKEN (fine-grained, this repo only, I
 .venv/Scripts/python -m claims_etl.notifications.cli --error-key quarantine/cms/desynpuf/<type>/<zip>.zip.error.json
 ```
 
-A Lambda handler stub (`claims_etl.notifications.lambda_handler`) exists for an S3 trigger on
-`quarantine/*.error.json`. It isn't deployed yet; before deploying, settings move to SSM
-Parameter Store and `requests` gets bundled into the package.
+In AWS, the `claims-etl-notify` Lambda ([`infra/terraform/notifier.tf`](infra/terraform/notifier.tf))
+runs this automatically for every new `quarantine/*.error.json`. It reads `GITHUB_TOKEN` from SSM
+Parameter Store (`/claims-etl/GITHUB_TOKEN`, a SecureString created outside Terraform so the token
+never lands in Terraform state) and `GITHUB_REPO` from a Terraform-managed parameter. A failure
+raises, so Lambda retries it twice. S3 triggers don't fire for files that already exist, so after
+an outage run `--scan` once.
+
+One-time token setup (PowerShell, from the project folder; reads the token from `.env`):
+
+```powershell
+$t = (Select-String -Path .env -Pattern '^GITHUB_TOKEN=(.+)$').Matches[0].Groups[1].Value
+aws ssm put-parameter --region us-east-2 --name /claims-etl/GITHUB_TOKEN --type SecureString --value $t
+Remove-Variable t
+```
 
 ## Automatic ingestion (AWS Lambda)
 
@@ -147,7 +158,7 @@ Terraform state is local (gitignored). Move it to an S3 backend before CI or any
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 143 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest      # 145 tests; no AWS or GitHub access (moto + responses)
 .venv/Scripts/python -m ruff check src tests
 ```
 

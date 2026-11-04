@@ -1,7 +1,7 @@
 """Build build/lambda.zip for the ingestion Lambda.
 
-Contents: the claims_etl package, the config/ folder, and PyYAML installed for
-the Lambda platform (Linux x86_64, CPython 3.13). pyarrow and numpy come from
+Contents: the claims_etl package, the config/ folder, and PyYAML + requests
+installed for the Lambda platform (Linux x86_64, CPython 3.13). pyarrow and numpy come from
 the AWS SDK for pandas layer; boto3 comes from the Lambda runtime.
 
 The zip is deterministic (sorted entries, fixed timestamps), so rebuilding
@@ -25,7 +25,7 @@ ZIP_PATH = BUILD_DIR / "lambda.zip"
 
 LAMBDA_PYTHON_VERSION = "3.13"  # keep in sync with infra/terraform (runtime + layer)
 LAMBDA_PLATFORM = "manylinux2014_x86_64"
-VENDORED_REQUIREMENTS = ["pyyaml>=6,<7"]
+VENDORED_REQUIREMENTS = ["pyyaml>=6,<7", "requests>=2.31,<3"]
 
 FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
 EXCLUDED_DIRS = {"__pycache__", ".pytest_cache"}

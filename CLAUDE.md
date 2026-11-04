@@ -199,8 +199,12 @@ retried later (`--scan`).
 
 - CLI: `--error-key <s3_key>` (one file) or `--scan` (every `.error.json` under
   `quarantine/` not yet ticketed; this is the retry mechanism).
-- Lambda handler stub for S3 ObjectCreated (prefix `quarantine/`, suffix
-  `.error.json`); not deployed yet.
+- Lambda `claims-etl-notify` (deployed via infra/terraform/notifier.tf), triggered
+  by S3 ObjectCreated (prefix `quarantine/`, suffix `.error.json`). Reads settings
+  from SSM because CLAIMS_ETL_SETTINGS_SOURCE=ssm; must never import pyarrow (no
+  pandas layer), so shared S3-event parsing lives in `claims_etl/s3_events.py`.
+- S3 triggers are not retroactive: after a notifier outage or a new deploy, run
+  `--scan` once to ticket any .error.json files that were already waiting.
 
 ### Tests
 
@@ -236,15 +240,20 @@ ticket result recorded.
 - [x] Buckets: landing, raw, marts (us-east-2, Block Public Access, SSE-S3 verified)
 - [x] AWS CLI v2 installed and configured (IAM user fredr-admin, default profile)
 - [x] Ingestion script: beneficiary_summary 2008 (116,352 rows to raw, reconciled 2026-11-02)
-- [ ] Ingest beneficiary_summary 2010 (2009 done); then inpatient/outpatient claims (new configs)
+- [ ] Inpatient/outpatient claims (new configs); beneficiary 2008-2010 reload in progress
 - [x] Lambda `claims-etl-ingest` deployed via Terraform (infra/terraform, local state),
       S3 trigger on landing cms/desynpuf/*.zip; pyarrow from AWSSDKPandas-Python313 layer
 - [x] End-to-end test of the S3 trigger: 2009 beneficiary (114,538 rows) loaded by
       Lambda; blind-test ragged-row file quarantined at csv_field_counts (2026-11-04)
 - [x] Quarantine notifier (GitHub issues), see "Quarantine notifications". Live-tested
-      2026-11-04: issue #1 created, re-delivery commented (kept open as a demo; its
-      quarantine objects and _tickets/bf0b177d….json are intentionally kept)
-- [ ] Deploy notifier Lambda (S3 trigger quarantine/*.error.json): switch get_setting
-      to SSM, store token in SSM, bundle `requests`. GitHub token expires 2027-02-02
+      2026-11-04: issue #1 created, re-delivery commented
+- [x] Notifier Lambda `claims-etl-notify` deployed (infra/terraform/notifier.tf), S3
+      trigger quarantine/*.error.json; token in SSM /claims-etl/GITHUB_TOKEN (created
+      outside Terraform, never in state). GitHub token expires 2027-02-02
+- [x] 2026-11-04: all S3 data cleared for a fresh landing test. Test files live in
+      gitignored test_files/ (3 good: 2008/2009/2010 Sample_1; 2 practice failures:
+      2008/2009 Sample_2, answer key in test_files/SPOILERS_answer_key.md).
+      Practice issue #2 (csv_header) diagnosed by the user.
+- [ ] Finish landing test: upload 2009/2010 Sample_1 and 2009 Sample_2
 - [ ] Move Terraform state to an S3 backend before CI
 - [ ] dbt project setup

@@ -135,8 +135,10 @@ resource "aws_lambda_permission" "allow_landing_bucket" {
   source_account = data.aws_caller_identity.current.account_id # confused-deputy guard
 }
 
-# Note: this resource owns the bucket's ENTIRE notification configuration.
-# Archive/quarantine keys live outside landing_prefix, so moves never re-trigger.
+# Note: this resource owns the bucket's ENTIRE notification configuration, so
+# every landing-bucket trigger lives here. The two filters cannot overlap:
+# zips under cms/desynpuf/ -> ingestion; quarantine/*.error.json -> notifier.
+# Archive/quarantine moves live outside landing_prefix, so ingestion never re-triggers.
 resource "aws_s3_bucket_notification" "landing" {
   bucket = data.aws_s3_bucket.landing.id
 
@@ -147,5 +149,15 @@ resource "aws_s3_bucket_notification" "landing" {
     filter_suffix       = ".zip"
   }
 
-  depends_on = [aws_lambda_permission.allow_landing_bucket]
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.notify.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "quarantine/"
+    filter_suffix       = ".error.json"
+  }
+
+  depends_on = [
+    aws_lambda_permission.allow_landing_bucket,
+    aws_lambda_permission.notify_from_landing_bucket,
+  ]
 }

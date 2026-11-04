@@ -17,3 +17,15 @@ output "log_group" {
 output "trigger" {
   value = "s3://${var.landing_bucket}/${var.landing_prefix}**/*.zip (ObjectCreated)"
 }
+
+output "notifier_function_name" {
+  value = aws_lambda_function.notify.function_name
+}
+
+output "notifier_log_group" {
+  value = aws_cloudwatch_log_group.notify.name
+}
+
+output "notifier_trigger" {
+  value = "s3://${var.landing_bucket}/quarantine/**/*.error.json (ObjectCreated)"
+}
