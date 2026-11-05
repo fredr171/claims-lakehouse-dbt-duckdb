@@ -37,6 +37,11 @@ class S3Store:
         """Create a store backed by a boto3 S3 client in the given region."""
         return cls(boto3.session.Session().client("s3", region_name=region))
 
+    @property
+    def client(self) -> Any:
+        """The underlying boto3 client (for callers needing calls not wrapped here)."""
+        return self._client
+
     def head(self, bucket: str, key: str) -> dict[str, Any] | None:
         """Object metadata, or None if the object does not exist."""
         try:

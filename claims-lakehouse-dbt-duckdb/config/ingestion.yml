@@ -20,3 +20,7 @@ default_limits:
 
 # Rows per Arrow record batch when writing Parquet (bounds memory use).
 parquet_batch_rows: 50000
+
+# Publish a FileIngested event (EventBridge default bus) for every file in raw, before
+# the landing file is archived. The transform runner subscribes (claims_etl/events.py).
+publish_events: true

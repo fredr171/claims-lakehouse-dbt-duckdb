@@ -33,6 +33,7 @@ dbt = [
 [project.scripts]
 claims-ingest = "claims_etl.ingestion.cli:main"
 claims-notify = "claims_etl.notifications.cli:main"
+claims-transform = "claims_etl.transform.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

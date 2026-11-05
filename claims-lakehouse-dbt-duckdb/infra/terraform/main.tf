@@ -117,7 +117,12 @@ resource "aws_lambda_function" "ingest" {
     }
   }
 
-  depends_on = [aws_cloudwatch_log_group.ingest, aws_iam_role_policy.ingest]
+  # ingest_events (transform.tf): the code publishes FileIngested, so the grant comes first.
+  depends_on = [
+    aws_cloudwatch_log_group.ingest,
+    aws_iam_role_policy.ingest,
+    aws_iam_role_policy.ingest_events,
+  ]
 }
 
 # S3 invokes asynchronously. On `error` the handler raises, so Lambda retries
