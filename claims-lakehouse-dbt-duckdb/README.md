@@ -182,6 +182,37 @@ and delivery rules:
   matches the answer key's `net_paid_by_processed_month.csv`.
 `dbt source freshness` warns when a monthly delivery is 35 days overdue.
 
+### Stop vs warn
+
+Each test is a **stop** or a **warn** (policy in `dbt/macros/test_scoping.sql`):
+
+- **Stop** (dbt severity `error`, the default): the data would make the intermediate
+  layer wrong. That covers keys and grain, identity columns, claim-family linkage,
+  amounts used in netting, service dates, and codes the intermediate logic branches on.
+  `dbt build` then **skips** every model downstream of the failing staging model, so
+  the intermediate tables keep their last good state. The skipped file stays
+  "unprocessed", so a corrected re-send catches the intermediate layer up with no
+  backfill. Stops always check every delivery month. If they checked only the new
+  months, the next delivery's run would pass and pull the skipped file's rows in.
+- **Warn** (`config: *warn` in the YAML, `severity='warn'` in singular tests): the
+  intermediate layer stays correct, but the data looks off. Examples are descriptive
+  codes, claims for a member not delivered yet, dates outside the delivery month, and
+  odd amount lines. Nothing is skipped. When dbt is given the months being processed
+  (`--vars '{delivery_months: ["2025-03"]}'`), warns check only those months, so an
+  accepted warning does not come back on every later delivery. Local builds without
+  the var check everything.
+- Humana amount rules (paid ≤ allowed ≤ billed, denied pays nothing, cost share =
+  allowed − paid, reversals never positive) warn per line. They **stop** when more than
+  1% of a month's lines (and at least 5) break them, because that means a broken
+  extract rather than a few odd lines.
+
+`tests/test_dbt_gating.py` proves the gating on corrupted copies of real deliveries:
+- a stop skips the intermediate model;
+- a stop keeps blocking later months;
+- a re-send recovers the intermediate tables exactly;
+- warns build and are scoped to the delivery months being processed;
+- many bad amount lines escalate to a stop.
+
 ```bash
 .venv/Scripts/python -m pip install -e ".[dev,dbt]"
 cd dbt
@@ -358,8 +389,8 @@ Terraform state is local (gitignored). Move it to an S3 backend before CI or any
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 172 tests; no AWS or GitHub access (moto + responses)
-.venv/Scripts/python -m pytest -m "not dbt"   # skip the ~2 min dbt end-to-end tests
+.venv/Scripts/python -m pytest      # 176 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest -m "not dbt"   # skip the ~4 min dbt end-to-end tests
 .venv/Scripts/python -m ruff check src tests
 ```
 

@@ -285,6 +285,14 @@ ticket result recorded.
   `unique_combination_of_columns` is local (tests/generic), so there is no package
   download. Every new model gets at least key tests; a new test must be shown to fail
   on deliberately broken data before it is trusted.
+- Test severity (dbt/macros/test_scoping.sql): STOP = severity error (default) for
+  anything that would make intermediate wrong (keys/grain, identity, family linkage,
+  netting amounts, service dates, codes the logic branches on); `dbt build` skips the
+  downstream intermediate models. WARN = `config: *warn` (YAML) or `severity='warn'`
+  (singular) when intermediate stays correct. STOPs are NEVER scoped to the batch's
+  delivery months (a skipped file stays unprocessed; a scoped stop would let the next
+  run pull it in); WARNs are scoped via the `delivery_months` var (`__in_batch__` /
+  `in_batch()`). Classify every new test; `tests/test_dbt_gating.py` must keep passing.
 - Correct downstream results are defined by `../answer_key/` (net paid by service and
   load month, final members, claim actions, member changes).
 

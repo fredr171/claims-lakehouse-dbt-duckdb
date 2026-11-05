@@ -1,17 +1,21 @@
 -- Every claim's beneficiary must have arrived in a CCLF8 delivery in the same month
 -- or earlier. A row here is a claim for an unknown (or not-yet-delivered) beneficiary,
 -- which would drop out of any join to the member dimension.
+-- WARN (macros/test_scoping.sql): the intermediate layer stays correct; scoped to the batch.
+{{ config(severity='warn') }}
 
 with claim_beneficiaries as (
 
     select 'claims_header' as model, beneficiary_mbi, min(delivery_month) as first_claim_month
     from {{ ref('stg_cclf__claims_header') }}
+    where {{ in_batch() }}
     group by beneficiary_mbi
 
     union all
 
     select 'part_b_physician_lines', beneficiary_mbi, min(delivery_month)
     from {{ ref('stg_cclf__part_b_physician_lines') }}
+    where {{ in_batch() }}
     group by beneficiary_mbi
 
 ),
