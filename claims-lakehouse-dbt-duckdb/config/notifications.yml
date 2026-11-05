@@ -1,0 +1,60 @@
+# Quarantine notifications: quarantine/<...>.csv.error.json -> ticket.
+# Tracker-agnostic on purpose: switching GitHub -> Jira changes only the client.
+# Bucket names and the quarantine prefix come from ingestion.yml.
+
+error_json_suffix: .csv.error.json
+ticket_prefix: _tickets/          # in the raw bucket; one <sha256>.json per quarantined checksum
+
+labels:
+  base: [quarantine, data-quality]   # the file type is added per ticket
+  match: quarantine                  # label used to look up existing OPEN tickets
+  default_color: c5def5
+  colors:
+    quarantine: d73a4a
+    data-quality: fbca04
+  descriptions:
+    quarantine: File quarantined by claims-etl ingestion
+    data-quality: Data delivery failed a validation check
+    default: "claims-etl file type"
+
+# Placeholders: file_type, file_name, failed_check. The file name carries the
+# delivery month (e.g. CCLF1_202301.csv), so no separate partition field is needed.
+title_template: "[Quarantine] {file_type} {file_name}: {failed_check}"
+max_title_chars: 200
+max_details_chars: 500
+
+# Placeholder: file_type. One entry per ingestion check, plus a default.
+next_steps:
+  known_file_type: >-
+    Upload under <feed prefix><file_type>/ (e.g. cms/cclf/claims_header/ or
+    humana/ma/member_eligibility/) using a folder that has a config for that feed in
+    config/file_types/, or add config/file_types/<file_type>.yml for a new type.
+  file_name: >-
+    Rename the file to match file_name_regex in config/file_types/{file_type}.yml
+    (e.g. CCLF1_YYYYMM.csv or HUM_ELIG_YYYYMM.csv, with a real month 01-12) and re-upload.
+  file_size: >-
+    The file is empty or above max_file_bytes. Re-export it; if the size is
+    genuine, raise the limit in config/file_types/{file_type}.yml.
+  csv_utf8: >-
+    The CSV is not valid UTF-8. Check the source encoding (e.g. Latin-1) at the
+    reported position and request a UTF-8 file.
+  csv_parseable: >-
+    Malformed quoting at the reported line. Inspect that line locally for stray
+    or unbalanced double quotes.
+  csv_header: >-
+    Compare the file header with expected_columns in config/file_types/{file_type}.yml.
+    If the source schema changed intentionally, update the config.
+  csv_field_counts: >-
+    Inspect the reported line numbers for missing or extra delimiters and
+    request a corrected file.
+  csv_row_count: >-
+    The CSV has a header but no data rows. Confirm the export completed upstream.
+  csv_key_columns: >-
+    Key column values are empty at the reported lines. Request a corrected file;
+    rows without keys cannot be joined downstream.
+  row_count_reconciliation: >-
+    CSV and Parquet row counts differ, which indicates an ingestion bug rather
+    than bad data. Re-run ingestion locally with --key and investigate.
+  default: >-
+    Review the .error.json report linked above and the check in
+    src/claims_etl/ingestion/checks.py.

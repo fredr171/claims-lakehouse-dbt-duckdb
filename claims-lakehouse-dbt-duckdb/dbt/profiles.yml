@@ -1,0 +1,17 @@
+# Committed on purpose: it holds no secrets. AWS credentials come from the default
+# credential chain (the AWS CLI profile locally), exactly like ingestion.
+claims_lakehouse:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      # Relative to dbt/; gitignored (*.duckdb). Tests set CLAIMS_DUCKDB_PATH to a temp file.
+      path: "{{ env_var('CLAIMS_DUCKDB_PATH', 'claims_lakehouse.duckdb') }}"
+      threads: 4
+      extensions:
+        - httpfs
+        - parquet
+      secrets:
+        - type: s3
+          provider: credential_chain
+          region: us-east-2

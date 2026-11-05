@@ -57,6 +57,8 @@ target/
 dbt_packages/
 logs/
 profiles.yml
+# The project profile holds no secrets (AWS credential chain), so it is committed.
+!claims-lakehouse-dbt-duckdb/dbt/profiles.yml
 
 # ---------------------------------------------------------------
 # Terraform
@@ -79,3 +81,6 @@ crash.log
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# dbt per-machine anonymous user id
+.user.yml

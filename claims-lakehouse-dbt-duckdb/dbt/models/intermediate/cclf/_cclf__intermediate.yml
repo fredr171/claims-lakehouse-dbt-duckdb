@@ -1,0 +1,138 @@
+# Intermediate: state that spans deliveries. Both models are incremental by affected
+# key (macros/incremental_by_affected_keys.sql); an incremental run must equal a full
+# rebuild, which tests/test_dbt_intermediate.py checks month by month.
+
+models:
+  - name: int_cclf__beneficiary_versions
+    description: >
+      Beneficiary history (SCD type 2) from CCLF8. One row per beneficiary per version;
+      a version starts when any tracked attribute changes (hash comparison), so it works
+      for change-only and full-snapshot deliveries. valid_to is exclusive and NULL while
+      current. Contains synthetic names/addresses: never select them into marts.
+    columns:
+      - name: beneficiary_version_id
+        description: "beneficiary_mbi | valid_from (YYYY-MM). Unique per version."
+        data_tests: [not_null, unique]
+      - name: beneficiary_mbi
+        description: "Medicare Beneficiary Identifier (synthetic)."
+        data_tests:
+          - not_null
+          - unique:
+              config:
+                where: "is_current"
+      - name: version_number
+        description: "1 for the first delivered version, then +1 per change."
+        data_tests: [not_null]
+      - name: valid_from
+        description: "Delivery month the version arrived (inclusive)."
+        data_tests: [not_null]
+      - name: valid_to
+        description: "Delivery month the next version arrived (exclusive); NULL while current."
+      - name: is_current
+        description: "True for the latest version of each beneficiary."
+      - name: change_type
+        description: "Derived: NEW for version 1, UPDATE otherwise (never from record_change_type)."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["NEW", "UPDATE"]
+      - name: changed_columns
+        description: "Tracked columns that differ from the previous version (empty for NEW)."
+      - name: attribute_hash
+        description: "md5 of the tracked attributes; equal hashes = no change."
+      - name: last_delivered_month
+        description: "Latest delivery that carried this version (later than valid_from only for snapshot-style deliveries)."
+      - name: delivery_count
+        description: "Delivered CCLF8 rows collapsed into this version."
+      - name: _source_checksums
+        description: "Sorted SHA-256s of the raw files this version was built from (drives incremental runs)."
+
+  - name: int_cclf__claim_families
+    description: >
+      One row per claim family (part + claim_control_number): the original claim version
+      plus any later cancellation/adjustment, with the net paid amount after them.
+      Latest version wins: cancellation -> 0, adjustment -> its amount, else the original.
+    columns:
+      - name: claim_family_key
+        description: "part:claim_control_number, e.g. A:A2302701116920."
+        data_tests: [not_null, unique]
+      - name: part
+        description: "A (CCLF1 institutional) or B (CCLF5 physician)."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["A", "B"]
+      - name: claim_control_number
+        description: "CLM_CNTL_NUM shared by every version in the family."
+        data_tests: [not_null]
+      - name: beneficiary_mbi
+        description: "Beneficiary on the family's first version."
+        data_tests: [not_null]
+      - name: has_original
+        description: >
+          False when only a cancellation/adjustment was loaded (its original predates the
+          loaded history). Never expected with complete history.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [true]
+              config:
+                severity: warn
+      - name: original_claim_id
+        description: "claim_id of the original version (adjustment_type_code 0)."
+      - name: original_delivery_month
+        description: "Delivery month of the original."
+      - name: original_amount
+        description: "Paid amount of the original (Part B: sum of its lines)."
+      - name: action_type
+        description: "CANCEL or ADJUST for the latest action; NULL when the original stands."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["CANCEL", "ADJUST"]
+      - name: action_claim_id
+        description: "claim_id of the latest cancellation/adjustment."
+      - name: action_delivery_month
+        description: "Delivery month of the latest cancellation/adjustment."
+      - name: action_amount
+        description: "Paid amount on the latest action (negative for a cancellation)."
+      - name: family_status
+        description: "ORIGINAL, CANCELLED, or ADJUSTED (from the latest version)."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["ORIGINAL", "CANCELLED", "ADJUSTED"]
+      - name: net_paid_amount
+        description: "What Medicare finally paid for the family."
+        data_tests: [not_null]
+      - name: service_start_date
+        description: "The original's claim_start_date (earliest version's if no original)."
+        data_tests: [not_null]
+      - name: service_month
+        description: "First day of the service_start_date month."
+        data_tests: [not_null]
+      - name: version_count
+        description: "Claim versions in the family."
+      - name: original_count
+        description: "Originals in the family; more than one would mean a reused control number."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: action_count
+        description: >
+          Cancellations/adjustments in the family. The generator sends at most one; real
+          CCLF can chain them (the latest one wins), so more than one only warns.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+              config:
+                severity: warn
+      - name: first_delivery_month
+        description: "Earliest delivery with a version of this family."
+      - name: latest_delivery_month
+        description: "Latest delivery with a version of this family."
+      - name: _source_checksums
+        description: "Sorted SHA-256s of the raw files this family was built from (drives incremental runs)."

@@ -1,0 +1,350 @@
+# Staging: one model per CCLF file type, one row per raw row (every delivery kept).
+# Each description starts with the original CMS column name.
+# Tests here check what staging promises (keys, types, code domains, delivery rules);
+# netting cancellations/adjustments and current-state logic are tested downstream.
+
+models:
+  - name: stg_cclf__claims_header
+    description: >
+      CCLF1 Part A claim header, typed and renamed. One row per claim version: an
+      original, a cancellation, or an adjustment each has its own claim_id and is
+      linked to its family by claim_control_number.
+    columns:
+      - name: claim_id
+        description: "CUR_CLM_UNIQ_ID. Unique per claim version, across all deliveries."
+        data_tests: [not_null, unique]
+      - name: claim_control_number
+        description: "CLM_CNTL_NUM. Shared by an original and its cancellation/adjustment (claim family key)."
+        data_tests: [not_null]
+      - name: original_claim_control_number
+        description: "CLM_ORG_CNTL_NUM. The original's control number on cancellations/adjustments; NULL on originals."
+      - name: beneficiary_mbi
+        description: "BENE_MBI_ID. Medicare Beneficiary Identifier (synthetic)."
+        data_tests: [not_null]
+      - name: beneficiary_hicn
+        description: "BENE_HIC_NUM. Legacy Health Insurance Claim number (synthetic)."
+      - name: facility_ccn
+        description: "PRVDR_OSCAR_NUM. Facility CMS Certification Number (OSCAR)."
+        data_tests: [not_null]
+      - name: facility_npi
+        description: "FAC_PRVDR_NPI_NUM. Facility NPI."
+      - name: attending_npi
+        description: "ATNDG_PRVDR_NPI_NUM. Attending physician NPI."
+      - name: facility_fips_state_code
+        description: "PRVDR_FAC_FIPS_ST_CD. Facility FIPS state code (text: keeps leading zeros)."
+      - name: claim_type_code
+        description: "CLM_TYPE_CD. 10 home health, 20 SNF, 30 swing bed, 40 outpatient, 50 hospice, 60 inpatient."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["10", "20", "30", "40", "50", "60"]
+      - name: adjustment_type_code
+        description: "CLM_ADJSMT_TYPE_CD. 0 original, 1 cancellation, 2 adjustment."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["0", "1", "2"]
+      - name: bill_facility_type_code
+        description: "CLM_BILL_FAC_TYPE_CD. 1st digit of the type of bill."
+      - name: bill_classification_code
+        description: "CLM_BILL_CLSFCTN_CD. 2nd digit of the type of bill."
+      - name: bill_frequency_code
+        description: "CLM_BILL_FREQ_CD. 3rd digit of the type of bill: 1 original, 7 replacement, 8 void."
+      - name: outpatient_service_type_code
+        description: "CLM_OP_SRVC_TYPE_CD. Outpatient service type."
+      - name: admission_type_code
+        description: "CLM_ADMSN_TYPE_CD. Inpatient admission type."
+      - name: admission_source_code
+        description: "CLM_ADMSN_SRC_CD. Inpatient admission source."
+      - name: patient_discharge_status_code
+        description: "BENE_PTNT_STUS_CD. Discharge status (text: '01', '03', ...)."
+      - name: drg_code
+        description: "DGNS_DRG_CD. MS-DRG (inpatient only)."
+      - name: medicare_nonpayment_reason_code
+        description: "CLM_MDCR_NPMT_RSN_CD. Medicare non-payment reason."
+      - name: primary_payer_code
+        description: "CLM_NCH_PRMRY_PYR_CD. Primary payer if not Medicare."
+      - name: principal_diagnosis_code
+        description: "PRNCPL_DGNS_CD. Principal diagnosis, ICD-10-CM without the decimal point."
+        data_tests: [not_null]
+      - name: admitting_diagnosis_code
+        description: "ADMTG_DGNS_CD. Admitting diagnosis, ICD-10-CM without the decimal point."
+      - name: icd_version_indicator
+        description: "DGNS_PRCDR_ICD_IND. 0 = ICD-10."
+      - name: claim_start_date
+        description: "CLM_FROM_DT. First date of service."
+        data_tests: [not_null]
+      - name: claim_end_date
+        description: "CLM_THRU_DT. Last date of service."
+        data_tests: [not_null]
+      - name: claim_effective_date
+        description: "CLM_EFCTV_DT. Claim effective date."
+      - name: claim_load_date
+        description: "CLM_IDR_LD_DT. Date CMS loaded the claim version; always inside the delivery month."
+        data_tests: [not_null]
+      - name: payment_amount
+        description: "CLM_PMT_AMT. Medicare paid amount; negative on cancellations."
+        data_tests: [not_null]
+      - name: total_charge_amount
+        description: "CLM_MDCR_INSTNL_TOT_CHRG_AMT. Total charges; negative on cancellations."
+      - &delivery_month
+        name: delivery_month
+        description: "First day of the delivery month, from the raw partition (file name)."
+        data_tests: [not_null]
+      - &source_file
+        name: _source_file
+        description: "Delivered CSV file name (ingestion metadata)."
+      - &source_row_number
+        name: _source_row_number
+        description: "Line number in the delivered CSV (header = line 1)."
+      - &source_checksum
+        name: _source_checksum
+        description: "SHA-256 of the delivered file; joins to the _manifests/<sha256>.json record."
+      - &ingested_at
+        name: _ingested_at
+        description: "UTC time the file was ingested to raw."
+      - &batch_id
+        name: _batch_id
+        description: "Ingestion run ID."
+
+  - name: stg_cclf__claims_diagnosis
+    description: >
+      CCLF4 Part A diagnosis codes, typed and renamed. One row per diagnosis per claim
+      version; sequence 0 is the principal diagnosis.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [claim_id, diagnosis_sequence_number]
+    columns:
+      - name: claim_id
+        description: "CUR_CLM_UNIQ_ID. Claim version this diagnosis belongs to."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_cclf__claims_header')
+                field: claim_id
+      - name: diagnosis_sequence_number
+        description: "CLM_VAL_SQNC_NUM. Position on the claim (0 = principal)."
+        data_tests: [not_null]
+      - name: beneficiary_mbi
+        description: "BENE_MBI_ID. Medicare Beneficiary Identifier (synthetic)."
+        data_tests: [not_null]
+      - name: beneficiary_hicn
+        description: "BENE_HIC_NUM. Legacy Health Insurance Claim number (synthetic)."
+      - name: facility_ccn
+        description: "PRVDR_OSCAR_NUM. Facility CMS Certification Number (OSCAR)."
+      - name: claim_type_code
+        description: "CLM_TYPE_CD. Same codes as stg_cclf__claims_header."
+      - name: claim_product_type_code
+        description: "CLM_PROD_TYPE_CD. P = principal, D = other diagnosis."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["P", "D"]
+      - name: diagnosis_code
+        description: "CLM_DGNS_CD. ICD-10-CM without the decimal point."
+        data_tests: [not_null]
+      - name: present_on_admission_indicator
+        description: "CLM_POA_IND. Y, N, U, W, or NULL (not reported)."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Y", "N", "U", "W"]
+      - name: icd_version_indicator
+        description: "DGNS_PRCDR_ICD_IND. 0 = ICD-10."
+      - name: claim_start_date
+        description: "CLM_FROM_DT. First date of service."
+      - name: claim_end_date
+        description: "CLM_THRU_DT. Last date of service."
+      - *delivery_month
+      - *source_file
+      - *source_row_number
+      - *source_checksum
+      - *ingested_at
+      - *batch_id
+
+  - name: stg_cclf__part_b_physician_lines
+    description: >
+      CCLF5 Part B physician claim lines, typed and renamed. One row per line per claim
+      version; claim-level fields repeat on every line.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [claim_id, line_number]
+    columns:
+      - name: claim_id
+        description: "CUR_CLM_UNIQ_ID. Unique per claim version, across all deliveries."
+        data_tests: [not_null]
+      - name: line_number
+        description: "CLM_LINE_NUM. Line position on the claim."
+        data_tests: [not_null]
+      - name: claim_control_number
+        description: "CLM_CNTL_NUM. Shared by an original and its cancellation/adjustment (claim family key)."
+        data_tests: [not_null]
+      - name: beneficiary_mbi
+        description: "BENE_MBI_ID. Medicare Beneficiary Identifier (synthetic)."
+        data_tests: [not_null]
+      - name: beneficiary_hicn
+        description: "BENE_HIC_NUM. Legacy Health Insurance Claim number (synthetic)."
+      - name: rendering_npi
+        description: "RNDRG_PRVDR_NPI_NUM. Rendering provider NPI."
+        data_tests: [not_null]
+      - name: rendering_provider_tin
+        description: "CLM_RNDRG_PRVDR_TAX_NUM. Rendering provider tax ID (synthetic)."
+      - name: rendering_provider_type_code
+        description: "RNDRG_PRVDR_TYPE_CD. Rendering provider type."
+      - name: rendering_provider_fips_state_code
+        description: "RNDRG_PRVDR_FIPS_ST_CD. Rendering provider FIPS state code."
+      - name: provider_specialty_code
+        description: "CLM_PRVDR_SPCLTY_CD. CMS specialty code (text: '06', '08', ...)."
+      - name: claim_type_code
+        description: "CLM_TYPE_CD. 71 = Part B physician claim."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["71"]
+      - name: adjustment_type_code
+        description: "CLM_ADJSMT_TYPE_CD. 0 original, 1 cancellation, 2 adjustment."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["0", "1", "2"]
+      - name: carrier_payment_denial_code
+        description: "CLM_CARR_PMT_DNL_CD. Carrier payment/denial code."
+      - name: processing_indicator_code
+        description: "CLM_PRCSG_IND_CD. Line processing indicator (A = allowed)."
+      - name: hcpcs_code
+        description: "CLM_LINE_HCPCS_CD. HCPCS/CPT procedure code."
+        data_tests: [not_null]
+      - name: hcpcs_modifier_1_code
+        description: "HCPCS_1_MDFR_CD. First HCPCS modifier."
+      - name: type_of_service_code
+        description: "CLM_FED_TYPE_SRVC_CD. Federal type of service."
+      - name: place_of_service_code
+        description: "CLM_POS_CD. Place of service (11 = office)."
+      - name: service_unit_quantity
+        description: "CLM_LINE_SRVC_UNIT_QTY. Units of service."
+      - name: line_primary_payer_code
+        description: "CLM_LINE_PRMRY_PYR_CD. Primary payer if not Medicare."
+      - name: line_diagnosis_code
+        description: "CLM_LINE_DGNS_CD. Line diagnosis, ICD-10-CM without the decimal point."
+      - name: diagnosis_1_code
+        description: "CLM_DGNS_1_CD. Claim diagnosis 1."
+      - name: diagnosis_2_code
+        description: "CLM_DGNS_2_CD. Claim diagnosis 2."
+      - name: diagnosis_3_code
+        description: "CLM_DGNS_3_CD. Claim diagnosis 3."
+      - name: icd_version_indicator
+        description: "DGNS_PRCDR_ICD_IND. 0 = ICD-10."
+      - name: claim_start_date
+        description: "CLM_FROM_DT. First date of service on the claim."
+        data_tests: [not_null]
+      - name: claim_end_date
+        description: "CLM_THRU_DT. Last date of service on the claim."
+      - name: line_start_date
+        description: "CLM_LINE_FROM_DT. Line first date of service."
+      - name: line_end_date
+        description: "CLM_LINE_THRU_DT. Line last date of service."
+      - name: claim_effective_date
+        description: "CLM_EFCTV_DT. Claim effective date."
+      - name: claim_load_date
+        description: "CLM_IDR_LD_DT. Date CMS loaded the claim version; always inside the delivery month."
+        data_tests: [not_null]
+      - name: line_paid_amount
+        description: "CLM_LINE_CVRD_PD_AMT. Line paid amount; negative on cancellations."
+        data_tests: [not_null]
+      - name: line_allowed_amount
+        description: "CLM_LINE_ALOWD_CHRG_AMT. Line allowed amount; negative on cancellations."
+      - *delivery_month
+      - *source_file
+      - *source_row_number
+      - *source_checksum
+      - *ingested_at
+      - *batch_id
+
+  - name: stg_cclf__beneficiary_demographics
+    description: >
+      CCLF8 beneficiary demographics, typed and renamed. One row per beneficiary per
+      delivery in which it is new or changed; each row is a full snapshot. Contains
+      synthetic names and addresses: never expose them in marts, issues, or logs.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [beneficiary_mbi, delivery_month]
+    columns:
+      - name: beneficiary_mbi
+        description: "BENE_MBI_ID. Medicare Beneficiary Identifier (synthetic); never changes."
+        data_tests: [not_null]
+      - name: beneficiary_hicn
+        description: "BENE_HIC_NUM. Legacy Health Insurance Claim number (synthetic)."
+        data_tests: [not_null]
+      - name: birth_date
+        description: "BENE_DOB."
+        data_tests: [not_null]
+      - name: death_date
+        description: "BENE_DEATH_DT. NULL while alive."
+      - name: age
+        description: "BENE_AGE. Age as of the delivery month (moves forward with no other change)."
+      - name: sex_code
+        description: "BENE_SEX_CD. 1 male, 2 female."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["0", "1", "2"]
+      - name: race_code
+        description: "BENE_RACE_CD. CMS race code."
+      - name: first_name
+        description: "BENE_1ST_NAME (synthetic)."
+      - name: middle_name
+        description: "BENE_MIDL_NAME (synthetic)."
+      - name: last_name
+        description: "BENE_LAST_NAME (synthetic)."
+      - name: address_line_1
+        description: "BENE_LINE_1_ADR (synthetic)."
+      - name: city
+        description: "GEO_ZIP_PLC_NAME."
+      - name: usps_state_code
+        description: "GEO_USPS_STATE_CD. Two-letter state."
+      - name: zip5_code
+        description: "GEO_ZIP5_CD. Text: keeps leading zeros."
+      - name: zip9_code
+        description: "BENE_ZIP_CD. ZIP+4 without the dash."
+      - name: fips_state_code
+        description: "BENE_FIPS_STATE_CD. Text: keeps leading zeros ('04')."
+      - name: fips_county_code
+        description: "BENE_FIPS_CNTY_CD. Text: keeps leading zeros ('013')."
+      - name: medicare_status_code
+        description: "BENE_MDCR_STUS_CD. 10 aged, 11 aged+ESRD, 20 disabled, 31 ESRD."
+      - name: dual_status_code
+        description: "BENE_DUAL_STUS_CD. Medicare-Medicaid dual status; 'NA' = not dual."
+      - name: original_entitlement_reason_code
+        description: "BENE_ORGNL_ENTLMT_RSN_CD. 0 age, 1 disability, 2 ESRD."
+      - name: entitlement_buyin_indicator
+        description: "BENE_ENTLMT_BUYIN_IND. Part A/B entitlement and state buy-in."
+      - name: part_a_enrollment_start_date
+        description: "BENE_PART_A_ENRLMT_BGN_DT."
+      - name: part_b_enrollment_start_date
+        description: "BENE_PART_B_ENRLMT_BGN_DT. NULL if not enrolled in Part B."
+      - name: coverage_start_date
+        description: "BENE_RNG_BGN_DT. Start of the beneficiary's range (attribution, or return from Medicare Advantage); no claims before it."
+        data_tests: [not_null]
+      - name: coverage_end_date
+        description: "BENE_RNG_END_DT. End of the range; filled in on death or when the beneficiary leaves FFS for Medicare Advantage (no claims after it)."
+      - name: record_change_type
+        description: >
+          RECORD_CHANGE_TYPE. Synthetic helper from the generator (NEW/UPDATE), NOT a real
+          CCLF field. Use only to verify change detection derived downstream.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["NEW", "UPDATE"]
+      - *delivery_month
+      - *source_file
+      - *source_row_number
+      - *source_checksum
+      - *ingested_at
+      - *batch_id

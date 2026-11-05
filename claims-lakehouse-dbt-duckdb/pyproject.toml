@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claims-etl"
+version = "0.1.0"
+description = "Landing -> raw ingestion and quarantine notifications for synthetic CMS CCLF claims files"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.35",
+    "pyarrow>=17",
+    "pyyaml>=6",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "moto[s3,ssm]>=5",
+    "responses>=0.25",
+    "ruff>=0.6",
+    "tzdata; sys_platform == 'win32'",  # pyarrow needs it to read tz-aware timestamps on Windows
+]
+
+# Transformations (dbt/). Kept out of the core deps: the Lambda package never needs them.
+dbt = [
+    "dbt-duckdb>=1.11,<1.12",
+]
+
+[project.scripts]
+claims-ingest = "claims_etl.ingestion.cli:main"
+claims-notify = "claims_etl.notifications.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["dbt: slow dbt end-to-end tests (generator + local raw + dbt runs)"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]

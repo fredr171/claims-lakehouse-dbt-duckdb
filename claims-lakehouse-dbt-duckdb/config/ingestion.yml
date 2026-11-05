@@ -1,0 +1,22 @@
+# Global ingestion settings (landing -> raw). See CLAUDE.md > Ingestion rules.
+region: us-east-2
+landing_bucket: fredr-claims-landing-2026
+raw_bucket: fredr-claims-raw-2026
+
+# Prefixes. Each must end with "/".
+# One prefix per feed (data source). Only .csv files directly under
+# <prefix><file_type>/ are processed; each file type names its feed's prefix.
+# Must match the Terraform variable landing_prefixes (trigger, IAM, raw keys).
+landing_prefixes:
+  - cms/cclf/                      # CMS CCLF (Medicare fee-for-service)
+  - humana/ma/                     # Humana Medicare Advantage
+archive_prefix: archive/           # in the landing bucket; mirrors the original key
+quarantine_prefix: quarantine/     # in the landing bucket; mirrors the original key
+manifest_prefix: _manifests/       # in the raw bucket; one <sha256>.json per processed file
+
+# Defaults; a file type may override any of these under its own `limits:` key.
+default_limits:
+  max_file_bytes: 536870912          # 512 MiB; generated CCLF/Humana files are 4-20 KB
+
+# Rows per Arrow record batch when writing Parquet (bounds memory use).
+parquet_batch_rows: 50000
