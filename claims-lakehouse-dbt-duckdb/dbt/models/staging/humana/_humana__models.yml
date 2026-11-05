@@ -1,4 +1,5 @@
-# Staging: one model per Humana file type, one row per raw row (every delivery kept).
+# Staging: one model per Humana file type, one row per raw row of the CURRENT delivery of
+# each file (stg_humana__deliveries lists every delivery, superseded ones included).
 # Each description starts with the delivered column name. Field names are invented by
 # the synthetic generator; Humana's real layouts are proprietary.
 # Tests check what staging promises (keys, types, code domains, delivery rules);
@@ -8,6 +9,48 @@
 # nothing skipped, scoped to the delivery months being processed.
 
 models:
+  - name: stg_humana__deliveries
+    description: >
+      Every Humana MA file delivered to raw, one row per delivery (immutable bronze). A
+      corrected re-send of a file is a second row for the same file_name; the latest
+      ingested one is current and the others are superseded. The humana staging models read
+      only current deliveries (macros/deliveries.sql); superseded ones stay in raw for audit.
+    data_tests:
+      - delivery_index_is_consistent  # STOP: misplaced file, or a tie for "current"
+      - raw_keeps_every_built_delivery:  # STOP: raw lost a delivery intermediate used
+          arguments:
+            intermediate_models: ['int_humana__member_versions', 'int_humana__claim_families']
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [file_type, checksum]
+    columns:
+      - name: file_type
+        description: Raw folder (file type) the delivery came from.
+        data_tests: [not_null]
+      - name: file_name
+        description: File name exactly as delivered (the delivery's identity, e.g. HUM_ELIG_202308.csv).
+        data_tests: [not_null]
+      - name: delivery_month
+        description: Delivery month from the file name (raw partition), as the first of the month.
+        data_tests: [not_null]
+      - name: checksum
+        description: SHA-256 of the delivered file (_source_checksum in its rows).
+        data_tests: [not_null]
+      - name: partition_checksum
+        description: The checksum=... raw partition the delivery is stored under (must equal checksum).
+      - name: ingested_at
+        description: When ingestion wrote the delivery to raw; decides which delivery is current.
+        data_tests: [not_null]
+      - name: row_count
+        description: Data rows in the delivery.
+      - name: is_current
+        description: True for the latest delivery of each file_name; staging reads only these.
+        data_tests: [not_null]
+      - name: current_checksum
+        description: Checksum of the file's current delivery (on a superseded row, the one that replaced it).
+      - name: deliveries_of_file
+        description: How many times this file_name was delivered (more than 1 = re-sent).
+
   - name: stg_humana__member_eligibility
     description: >
       HUM_ELIG Medicare Advantage eligibility, typed and renamed. One row per member per

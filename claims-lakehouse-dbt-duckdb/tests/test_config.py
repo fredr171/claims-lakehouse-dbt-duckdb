@@ -41,6 +41,8 @@ REAL_FILE_TYPES = {
     ),
 }
 
+SHA = "a" * 64  # a well-formed SHA-256 for key tests
+
 
 # Humana MA feed: file_type -> (file name prefix, column count, first, last, key columns).
 HUMANA_FILE_TYPES = {
@@ -86,7 +88,9 @@ def test_humana_name_resolves_to_delivery_month_partition(file_type: str) -> Non
     ft = load_config().file_types[file_type]
     groups = ft.match_file_name(f"{HUMANA_FILE_TYPES[file_type][0]}_202512.csv")
     assert groups == {"year": "2025", "month": "12"}
-    assert ft.raw_key(groups) == f"humana/ma/{file_type}/delivery_month=2025-12/part-0.parquet"
+    assert ft.raw_key(groups, SHA) == (
+        f"humana/ma/{file_type}/delivery_month=2025-12/checksum={SHA}/part-0.parquet"
+    )
 
 
 @pytest.mark.parametrize("file_type", sorted(REAL_FILE_TYPES))
@@ -104,7 +108,9 @@ def test_real_name_resolves_to_delivery_month_partition(file_type: str) -> None:
     ft = load_config().file_types[file_type]
     groups = ft.match_file_name(f"CCLF{number}_202512.csv")
     assert groups == {"year": "2025", "month": "12"}
-    assert ft.raw_key(groups) == f"cms/cclf/{file_type}/delivery_month=2025-12/part-0.parquet"
+    assert ft.raw_key(groups, SHA) == (
+        f"cms/cclf/{file_type}/delivery_month=2025-12/checksum={SHA}/part-0.parquet"
+    )
 
 
 def test_each_file_type_accepts_only_its_own_cclf_number() -> None:
@@ -196,7 +202,7 @@ def test_file_type_prefix_must_be_a_listed_feed(config_dir: Path) -> None:
     _edit_file_type(
         config_dir,
         landing_prefix="aetna/ma/",
-        raw_key_template="aetna/ma/claims_header/delivery_month={year}-{month}/part-0.parquet",
+        raw_key_template="aetna/ma/claims_header/delivery_month={year}-{month}/checksum={checksum}/x",
     )
     with pytest.raises(ConfigError, match="not in landing_prefixes"):
         load_config(config_dir)
@@ -204,15 +210,47 @@ def test_file_type_prefix_must_be_a_listed_feed(config_dir: Path) -> None:
 
 def test_raw_key_must_stay_in_the_file_types_folder(config_dir: Path) -> None:
     # IAM grants raw writes per feed prefix, so a raw key elsewhere would fail at upload.
-    _edit_file_type(config_dir, raw_key_template="humana/ma/claims_header/{year}/part-0.parquet")
+    _edit_file_type(
+        config_dir, raw_key_template="humana/ma/claims_header/{year}/{checksum}.parquet"
+    )
     with pytest.raises(ConfigError, match="must start with 'cms/cclf/claims_header/'"):
         load_config(config_dir)
 
 
 def test_template_field_not_in_regex_is_rejected(config_dir: Path) -> None:
-    _edit_file_type(config_dir, raw_key_template="x/sample={sample}/part-0.parquet")
+    _edit_file_type(config_dir, raw_key_template="x/sample={sample}/{checksum}.parquet")
     with pytest.raises(ConfigError, match="sample"):
         load_config(config_dir)
+
+
+def test_raw_key_without_checksum_is_rejected(config_dir: Path) -> None:
+    # Immutable bronze: a key without the checksum would let a re-send overwrite the original.
+    _edit_file_type(config_dir, raw_key_template=(
+        "cms/cclf/claims_header/delivery_month={year}-{month}/part-0.parquet"))  # fmt: skip
+    with pytest.raises(ConfigError, match="must contain {checksum}"):
+        load_config(config_dir)
+
+
+def test_regex_may_not_capture_checksum(config_dir: Path) -> None:
+    _edit_file_type(config_dir, file_name_regex=r"^CCLF1_(?P<checksum>\d{6})\.csv$")
+    with pytest.raises(ConfigError, match="must not capture 'checksum'"):
+        load_config(config_dir)
+
+
+def test_delivery_keys_keep_every_delivery_and_the_file_name() -> None:
+    config = load_config()
+    key = "cms/cclf/claims_header/CCLF1_202308.csv"
+    assert (
+        config.archive_key(key, SHA)
+        == f"archive/cms/cclf/claims_header/checksum={SHA}/CCLF1_202308.csv"
+    )
+    assert config.quarantine_key(key, SHA) == (
+        f"quarantine/cms/cclf/claims_header/checksum={SHA}/CCLF1_202308.csv"
+    )
+    assert config.archive_key(key, "b" * 64) != config.archive_key(key, SHA)
+    for bad in ("", "ABC", "a" * 63, "../" + "a" * 61):
+        with pytest.raises(ValueError, match="SHA-256"):
+            config.archive_key(key, bad)
 
 
 def test_key_column_must_be_an_expected_column(config_dir: Path) -> None:

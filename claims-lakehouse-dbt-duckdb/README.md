@@ -69,8 +69,9 @@ identical in all 36 months of each feed.
    `_source_row_number`, `_ingested_at` (UTC), `_batch_id`.
 4. **Reconcile**: the Parquet footer row count must equal the CSV data row count before anything
    is published.
-5. **Publish**: upload to a deterministic key (re-runs overwrite rather than duplicate), write
-   the manifest, and move the file to `archive/`.
+5. **Publish**: upload to the delivery's own key (delivery month + checksum: a re-run rewrites
+   only its own key, a re-send never touches the original), write the manifest, and move the
+   file to `archive/.../checksum=<sha256>/`.
 
 Data problems end in `quarantined`. Infrastructure problems (S3, network) end in `error`, and the
 file stays in landing so the next run retries it.
@@ -98,19 +99,25 @@ belongs in dbt staging tests, not here.
 
 ```
 landing   <feed>/<file_type>/<file>.csv                     ← drop new files here
-          archive/<feed>/<file_type>/<file>.csv             ← processed
-          quarantine/<feed>/<file_type>/<file>.csv[.error.json]
-raw       <feed>/<file_type>/delivery_month=<yyyy-mm>/part-0.parquet
+          archive/<feed>/<file_type>/checksum=<sha256>/<file>.csv     ← processed
+          quarantine/<feed>/<file_type>/checksum=<sha256>/<file>.csv[.error.json]
+raw       <feed>/<file_type>/delivery_month=<yyyy-mm>/checksum=<sha256>/part-0.parquet
           _manifests/<sha256>.json                          ← one per processed file, all feeds
           _tickets/<sha256>.json
 ```
 
 For example, `humana/ma/member_eligibility/HUM_ELIG_202301.csv` becomes
-`humana/ma/member_eligibility/delivery_month=2023-01/part-0.parquet` in raw.
+`humana/ma/member_eligibility/delivery_month=2023-01/checksum=<sha256>/part-0.parquet` in raw.
 
-Raw partitions encode **delivery identity**, taken from the file name, never data content:
-`CCLF1_202301.csv` → `claims_header/delivery_month=2023-01`. Each month lands in its own
-partition, and a corrected re-send of the same month replaces only that partition. Claims
+**Immutable bronze.** Nothing a payer delivers is ever overwritten or deleted. Raw partitions
+encode **delivery identity**: the month from the file name (never data content:
+`CCLF1_202301.csv` → `claims_header/delivery_month=2023-01`) plus the file's SHA-256. A
+corrected re-send of a file lands *next to* the original, and dbt decides which delivery is
+current (see `stg_<feed>__deliveries` below). So you can always answer "what did the payer
+send, and when", re-run a stopped build on exactly the data it saw, or roll back a bad
+correction. Versioning and a lifecycle rule on the landing and raw buckets
+([`storage.tf`](infra/terraform/storage.tf)) are the safety net for human mistakes: a
+deleted or overwritten object stays restorable for 90 days. Claims
 arrive late (service dates up to 12 months before the load month), and cancellations and
 adjustments in later months refer back to earlier originals, so claim-date logic and
 de-duplication across deliveries happen in dbt, never by splitting files at ingestion.
@@ -145,6 +152,7 @@ its own dbt source and staging folder (`models/staging/cclf/`, `models/staging/h
 
 | Model | Grain | Unique key |
 |---|---|---|
+| `staging.stg_cclf__deliveries` / `stg_humana__deliveries` (tables) | delivered file | `file_type`, `checksum` |
 | `staging.stg_cclf__claims_header` | claim version | `claim_id` |
 | `staging.stg_cclf__claims_diagnosis` | diagnosis per claim version | `claim_id`, `diagnosis_sequence_number` |
 | `staging.stg_cclf__part_b_physician_lines` | line per claim version | `claim_id`, `line_number` |
@@ -152,7 +160,18 @@ its own dbt source and staging folder (`models/staging/cclf/`, `models/staging/h
 | `staging.stg_humana__member_eligibility` | member per delivery | `member_id`, `delivery_month` |
 | `staging.stg_humana__medical_claim_lines` | line per claim version | `claim_id`, `line_number`, `claim_frequency_code` |
 
-Staging does only three things, the same way for both feeds:
+**Which delivery counts.** Raw keeps every delivery. `stg_<feed>__deliveries` lists them all,
+one row per delivered file, with `is_current` (the latest ingested delivery of each file name),
+`current_checksum` (on a superseded row, the delivery that replaced it) and
+`deliveries_of_file`. Every staging model reads only the rows of current deliveries
+([`macros/deliveries.sql`](dbt/macros/deliveries.sql)). A STOP test
+(`delivery_index_is_consistent`) fails the feed if a file sits under another file's checksum
+folder or two deliveries of one file tie for "current". Because raw never loses a delivery,
+another STOP (`raw_keeps_every_built_delivery`) fails the feed if a checksum that
+intermediate was built from is missing from raw entirely (a mistaken delete, a wrong glob):
+intermediate keeps its state instead of having those keys pruned.
+
+Apart from that, staging does only three things, the same way for both feeds:
 
 - renames delivered columns to readable names (`CUR_CLM_UNIQ_ID` → `claim_id`,
   `SERVICE_FROM_DT` → `claim_start_date`; each column's description keeps the delivered name);
@@ -272,7 +291,8 @@ Every row records the SHA-256s of the raw files it came from (`_source_checksums
 
 1. Finds the keys that have rows from a raw file the model has not processed yet: a new
    month, or a corrected re-send of an old one.
-2. Adds the keys built from a file that is no longer in raw, because a re-send replaced it.
+2. Adds the keys built from a file that staging no longer shows: a delivery a re-send
+   superseded (it stays in raw, but is no longer current).
 3. Recomputes the full history of only those keys and replaces them (`delete+insert`).
 4. A post-hook deletes keys whose source rows vanished entirely.
 
@@ -496,7 +516,7 @@ CloudWatch alarm (ALARM/OK) ──► SNS claims-etl-alerts ──► claims-etl
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 230 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest      # 240 tests; no AWS or GitHub access (moto + responses)
 .venv/Scripts/python -m pytest -m "not dbt"   # skip the ~4 min dbt end-to-end tests
 .venv/Scripts/python -m ruff check src tests
 ```
@@ -553,6 +573,7 @@ src/claims_etl/notifications/
   config.py                 notifications.yml (labels, title template, next steps)
   settings.py               get_setting(): env locally, SSM in Lambda
   cli.py / lambda_handler.py
+scripts/migrate_to_immutable_bronze.py  one-off: move pre-2026-11-05 objects to checksum keys
 scripts/build_lambda.py     Lambda packages: lambda.zip (ingest + notify), --transform
 infra/terraform/            main.tf (ingestion), notifier.tf, transform.tf, triggers, IAM, logs
 tests/                      pytest for ingestion + notifier; test_dbt_intermediate.py (dbt end to end)

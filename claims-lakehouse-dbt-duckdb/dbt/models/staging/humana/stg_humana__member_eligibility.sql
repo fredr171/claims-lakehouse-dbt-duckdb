@@ -4,7 +4,8 @@
 
 with source as (
 
-    select * from {{ source('humana', 'member_eligibility') }}
+    -- Only the current delivery of each file; superseded re-sends stay in raw.
+    {{ current_delivery_rows('humana', 'member_eligibility') }}
 
 ),
 

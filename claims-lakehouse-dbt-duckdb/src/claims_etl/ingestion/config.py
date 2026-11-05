@@ -69,9 +69,14 @@ class FileTypeConfig:
         match = self.file_name_regex.fullmatch(file_name)
         return match.groupdict() if match else None
 
-    def raw_key(self, groups: dict[str, str]) -> str:
-        """Deterministic output key in the raw bucket (re-runs overwrite)."""
-        return self.raw_key_template.format(**groups)
+    def raw_key(self, groups: dict[str, str], checksum: str) -> str:
+        """Output key in the raw bucket: one immutable key per delivered file.
+
+        The template names the delivery (from the file name) and its content
+        (`{checksum}`), so a corrected re-send lands NEXT TO the original instead of
+        overwriting it; dbt staging decides which delivery is current.
+        """
+        return self.raw_key_template.format(**groups, checksum=_checked_checksum(checksum))
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,14 @@ class IngestionConfig:
         if len(parts) != 2 or not parts[0] or not parts[1]:
             return None
         return parts[0]
+
+    def archive_key(self, source_key: str, checksum: str) -> str:
+        """archive/<feed>/<file_type>/checksum=<sha256>/<file_name>: never overwritten."""
+        return _delivery_key(self.archive_prefix, source_key, checksum)
+
+    def quarantine_key(self, source_key: str, checksum: str) -> str:
+        """quarantine/<feed>/<file_type>/checksum=<sha256>/<file_name> (+ .error.json)."""
+        return _delivery_key(self.quarantine_prefix, source_key, checksum)
 
     def file_types_for_key(self, key: str) -> set[str]:
         """File types configured for the key's feed (a CCLF folder under humana/ is unknown)."""
@@ -196,6 +209,26 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+CHECKSUM_FIELD = "checksum"  # filled in by ingestion, never by the file name regex
+
+
+def _checked_checksum(checksum: str) -> str:
+    if not _SHA256.fullmatch(checksum or ""):
+        raise ValueError("checksum must be a lowercase hex SHA-256")
+    return checksum
+
+
+def _delivery_key(prefix: str, source_key: str, checksum: str) -> str:
+    """<prefix><source folder>/checksum=<sha256>/<file name>: one key per delivered file.
+
+    The delivered file name is kept exactly; the checksum folder keeps every delivery of
+    the same name (a corrected re-send never replaces the original).
+    """
+    folder, _, file_name = source_key.rpartition("/")
+    return f"{prefix}{folder}/{CHECKSUM_FIELD}={_checked_checksum(checksum)}/{file_name}"
+
+
 def _template_fields(template: str) -> set[str]:
     """Placeholder names used in a str.format template."""
     return {name for _, name, _, _ in string.Formatter().parse(template) if name}
@@ -212,7 +245,16 @@ def _parse_file_type(raw: dict[str, Any], default_limits: Limits, path: Path) ->
     except re.error as exc:
         raise ConfigError(f"{path.name}: invalid file_name_regex: {exc}") from exc
 
-    unknown = _template_fields(raw["raw_key_template"]) - set(regex.groupindex)
+    fields = _template_fields(raw["raw_key_template"])
+    if CHECKSUM_FIELD in regex.groupindex:
+        raise ConfigError(f"{path.name}: the regex must not capture '{CHECKSUM_FIELD}'")
+    if CHECKSUM_FIELD not in fields:
+        # Immutable bronze: without the checksum a re-send would overwrite the original.
+        raise ConfigError(
+            f"{path.name}: raw_key_template must contain {{{CHECKSUM_FIELD}}} "
+            "(one key per delivered file)"
+        )
+    unknown = fields - set(regex.groupindex) - {CHECKSUM_FIELD}
     if unknown:
         raise ConfigError(
             f"{path.name}: raw_key_template uses {sorted(unknown)} not captured by regex"

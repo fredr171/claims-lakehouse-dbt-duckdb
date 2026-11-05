@@ -3,7 +3,8 @@
 
 with source as (
 
-    select * from {{ source('cclf', 'claims_diagnosis') }}
+    -- Only the current delivery of each file; superseded re-sends stay in raw.
+    {{ current_delivery_rows('cclf', 'claims_diagnosis') }}
 
 ),
 

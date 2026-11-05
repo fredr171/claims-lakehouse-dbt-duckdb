@@ -8,7 +8,9 @@ file_type: member_eligibility
 # Named groups are available to raw_key_template. Raw is partitioned by
 # delivery month (from the file name), never by claim or enrollment dates.
 file_name_regex: '^HUM_ELIG_(?P<year>\d{4})(?P<month>0[1-9]|1[0-2])\.csv$'
-raw_key_template: 'humana/ma/member_eligibility/delivery_month={year}-{month}/part-0.parquet'
+# Then by the file's SHA-256 ({checksum}, filled in by ingestion): every delivery keeps
+# its own key, so a corrected re-send sits next to the original (immutable bronze).
+raw_key_template: 'humana/ma/member_eligibility/delivery_month={year}-{month}/checksum={checksum}/part-0.parquet'
 
 # MEMBER_ID is the payer's member key. MBI (the Medicare ID, used to match
 # members across payers) is checked in dbt staging, not here.
