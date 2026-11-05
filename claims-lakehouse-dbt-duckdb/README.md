@@ -394,6 +394,7 @@ Every file that ingestion puts in raw triggers a dbt build of its feed, with no 
 
 ```
 claims-etl-ingest ──FileIngested──► EventBridge rule ──► SQS FIFO (one message group) ──► claims-etl-transform
+                          └── undeliverable ──► claims-etl-transform-undelivered
                                                               └── after 3 failed receives ──► dead-letter queue
 ```
 
@@ -418,7 +419,16 @@ claims-etl-ingest ──FileIngested──► EventBridge rule ──► SQS FIF
    | `passed` | all tests pass | published | message deleted |
    | `warned` | WARN tests found issues; intermediate built | published | deleted |
    | `stopped` | a STOP test failed; dbt skipped the intermediate models below it | published (the stopped feed stays pending: its checksum is not in intermediate yet) | deleted |
-   | `error` | a model or test could not run (SQL error, S3 trouble) or dbt crashed | **kept** | raised → retried → DLQ |
+   | `error` | a model or test could not run (SQL error, S3 trouble) or dbt crashed | **kept** | raised → retried after a backoff → DLQ |
+
+   **Retry backoff.** SQS retries a failed message only when its visibility timeout runs
+   out: 3600 s here (6 × the function timeout, AWS's guidance for Lambda consumers). Waiting
+   that long after a 6-second crash would stall the single FIFO group for an hour per attempt.
+   So before raising, the handler shortens the batch's visibility to `retry_backoff_seconds`
+   in `config/transform.yml`, by receive count: 2 min, 5 min, then 10 min. A passing problem
+   (a state conflict, S3 trouble) is retried within minutes, and a persistent one reaches the
+   DLQ in about 17 minutes instead of 3 hours. The hour stays the backstop for a function
+   that dies before it can shorten anything (timeout, out of memory).
 
    A run report (`report.json`: outcome, test names, failure **counts**, skipped models, the
    triggering files; never row values) and `run_results.json` go to
@@ -440,10 +450,10 @@ Exit codes: 0 = passed or warned, 2 = stopped, 1 = error.
 
 | Resource (`transform.tf`) | Details |
 |---|---|
-| Lambda `claims-etl-transform` | Python 3.13, 2048 MB, 600 s timeout, 2 GB `/tmp`; dbt target `lambda` |
+| Lambda `claims-etl-transform` | Python 3.13, 2048 MB, 600 s timeout, 2 GB `/tmp`; dbt target `lambda`; dbt starts via `claims_etl.transform.dbt_cli` (threading locks: Lambda has no `/dev/shm`) |
 | Package | `build/transform_lambda.zip` (`build_lambda.py --transform`): dbt-core, dbt-duckdb, duckdb at the locally tested versions, the dbt project, and the DuckDB `httpfs` + `aws` extensions (nothing is downloaded at run time). 219 MiB unzipped (limit 250): the unused 275 MB dbt v2 parser binary is replaced by an empty placeholder wheel, and Babel's locale data is cut to English. 72 MB zipped, so it deploys through `s3://fredr-claims-artifacts-2026` |
-| Queue | `claims-etl-transform.fifo`, visibility timeout 3600 s (6 × the function timeout), DLQ `claims-etl-transform-dlq.fifo` (14 days) |
-| Rule | `source = claims-etl.ingestion`, `detail-type = FileIngested` → queue, message group `transform` |
+| Queue | `claims-etl-transform.fifo`, content-based deduplication (required: EventBridge sends no deduplication ID), visibility timeout 3600 s (6 × the function timeout; a failed build sets its own shorter backoff), DLQ `claims-etl-transform-dlq.fifo` (14 days) |
+| Rule | `source = claims-etl.ingestion`, `detail-type = FileIngested` → queue, message group `transform`; retries for 24 h, then the standard queue `claims-etl-transform-undelivered` (14 days) |
 | IAM | Read raw feed prefixes; read/write `_transform/*`; consume its queue; own log group. Ingestion gains `events:PutEvents` on the default bus, limited to its own source |
 
 ## Tests
