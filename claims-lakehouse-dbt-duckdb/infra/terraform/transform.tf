@@ -72,6 +72,10 @@ resource "aws_sqs_queue" "transform" {
   name                      = "${local.transform_name}.fifo"
   fifo_queue                = true
   message_retention_seconds = 345600 # 4 days
+  # Required for an EventBridge target: it sets the message group but never a
+  # deduplication ID, and a FIFO queue rejects sends with neither. Each event body
+  # carries EventBridge's unique event id, so distinct events never collapse.
+  content_based_deduplication = true
   # AWS guidance for Lambda consumers: at least 6x the function timeout.
   visibility_timeout_seconds = 6 * var.transform_timeout_seconds
   sqs_managed_sse_enabled    = true
@@ -111,6 +115,45 @@ resource "aws_cloudwatch_event_target" "transform_queue" {
   sqs_target {
     message_group_id = "transform" # one group: builds run one at a time, in order
   }
+
+  # An event EventBridge cannot deliver lands here instead of being dropped.
+  retry_policy {
+    maximum_event_age_in_seconds = 86400
+    maximum_retry_attempts       = 10
+  }
+  dead_letter_config {
+    arn = aws_sqs_queue.file_ingested_dlq.arn
+  }
+}
+
+# EventBridge target DLQs must be standard queues (FIFO is not supported).
+resource "aws_sqs_queue" "file_ingested_dlq" {
+  name                      = "${local.transform_name}-undelivered"
+  message_retention_seconds = 1209600 # 14 days (the maximum)
+  sqs_managed_sse_enabled   = true
+  tags                      = local.transform_tags
+}
+
+data "aws_iam_policy_document" "file_ingested_dlq" {
+  statement {
+    sid       = "AllowFileIngestedRuleDeadLetters"
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.file_ingested_dlq.arn]
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_cloudwatch_event_rule.file_ingested.arn]
+    }
+  }
+}
+
+resource "aws_sqs_queue_policy" "file_ingested_dlq" {
+  queue_url = aws_sqs_queue.file_ingested_dlq.id
+  policy    = data.aws_iam_policy_document.file_ingested_dlq.json
 }
 
 data "aws_iam_policy_document" "transform_queue" {

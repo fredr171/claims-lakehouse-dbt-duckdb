@@ -307,11 +307,17 @@ ticket result recorded.
   `publish_events: true` in ingestion.yml.
 - EventBridge rule -> SQS FIFO `claims-etl-transform.fifo` (ONE message group: one build at
   a time) -> Lambda `claims-etl-transform` (infra/terraform/transform.tf), batch up to 10;
-  DLQ `claims-etl-transform-dlq.fifo` after 3 receives.
+  DLQ `claims-etl-transform-dlq.fifo` after 3 receives. The queue MUST keep
+  content_based_deduplication = true: EventBridge sends no deduplication ID, and without it
+  every delivery fails (2026-11-05: 2023-04 events silently dropped). Undeliverable events
+  go to the standard queue `claims-etl-transform-undelivered` (rule target DLQ).
 - The runner (claims_etl/transform/runner.py) builds the WHOLE FEED (`source:<cclf|humana>+`),
   never one file type: a stop in CCLF5 must still block claim families when CCLF1 arrives.
   `delivery_months` = the events' months (WARN scoping only). dbt runs as a SUBPROCESS
-  (process exit closes and checkpoints DuckDB; no dbt state in a warm Lambda).
+  (process exit closes and checkpoints DuckDB; no dbt state in a warm Lambda) via
+  `python -m claims_etl.transform.dbt_cli`, never `dbt.cli.main` directly: Lambda has no
+  /dev/shm, so dbt's multiprocessing locks crash; dbt_cli swaps in threading locks
+  (tests/test_dbt_cli.py simulates the missing semaphores).
 - Outcomes: passed / warned / stopped -> publish the state, write the report, delete the
   messages (final answers). error (model/test could not run, dbt crash, state conflict) ->
   keep the old state, write the report, raise (retry, then DLQ).
