@@ -1,6 +1,8 @@
 -- A claim version is delivered in the month CMS loaded it (CLM_IDR_LD_DT), so the
 -- load date must fall inside the delivery month. A row here means a file landed in
 -- the wrong month's partition, or the delivery is mislabeled.
+-- WARN (macros/test_scoping.sql): the intermediate layer stays correct; scoped to the batch.
+{{ config(severity='warn') }}
 
 with claim_versions as (
 
@@ -17,3 +19,4 @@ with claim_versions as (
 select *
 from claim_versions
 where date_trunc('month', claim_load_date) <> delivery_month
+  and {{ in_batch() }}

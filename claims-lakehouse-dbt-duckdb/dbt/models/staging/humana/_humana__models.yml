@@ -3,6 +3,9 @@
 # the synthetic generator; Humana's real layouts are proprietary.
 # Tests check what staging promises (keys, types, code domains, delivery rules);
 # member history and claim families (reversal/replacement netting) are tested downstream.
+# Severity (macros/test_scoping.sql): tests are STOPs by default (dbt severity error;
+# downstream intermediate models are skipped). `config: *warn` marks a WARN: logged,
+# nothing skipped, scoped to the delivery months being processed.
 
 models:
   - name: stg_humana__member_eligibility
@@ -29,13 +32,16 @@ models:
         description: "LAST_NAME (synthetic PII)."
       - name: birth_date
         description: "DOB."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: &warn {severity: warn, where: "__in_batch__"}
       - name: gender_code
         description: "GENDER. M or F (CCLF uses 1/2)."
         data_tests:
           - accepted_values:
               arguments:
                 values: ["M", "F"]
+              config: *warn
       - name: death_date
         description: "DEATH_DT. Filled on the member's TERM row after death."
       - name: address_line_1
@@ -50,10 +56,14 @@ models:
         description: "COUNTY_FIPS. 5-digit state + county FIPS code (CCLF splits it into 2 + 3 digits)."
       - name: contract_id
         description: "CONTRACT_ID. MA contract (synthetic, e.g. H9101)."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: plan_benefit_package_id
         description: "PBP_ID. Plan benefit package within the contract (3 digits, leading zeros)."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: plan_name
         description: "PLAN_NAME (synthetic)."
       - name: product_type
@@ -62,9 +72,12 @@ models:
           - accepted_values:
               arguments:
                 values: ["HMO", "PPO", "D-SNP"]
+              config: *warn
       - name: enrollment_start_date
         description: "ENROLLMENT_START_DT. First covered day in this plan."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: enrollment_end_date
         description: "ENROLLMENT_END_DT. Last covered day; NULL while enrolled (set on the TERM row)."
       - name: pcp_npi
@@ -79,6 +92,7 @@ models:
           - accepted_values:
               arguments:
                 values: ["Y", "N"]
+              config: *warn
       - name: low_income_subsidy_flag
         description: "LIS_FLAG. Y = Part D low-income subsidy."
         data_tests: *yes_no
@@ -90,7 +104,9 @@ models:
         data_tests: *yes_no
       - name: file_as_of_date
         description: "FILE_AS_OF_DT. Eligibility snapshot date; falls in the delivery month."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: record_change_type
         description: >
           RECORD_CHANGE_TYPE. Synthetic generator helper (NEW/UPDATE/TERM), not a real
@@ -99,6 +115,7 @@ models:
           - accepted_values:
               arguments:
                 values: ["NEW", "UPDATE", "TERM"]
+              config: *warn
       - &delivery_month
         name: delivery_month
         description: "First day of the delivery month, from the raw partition (file name)."
@@ -146,12 +163,15 @@ models:
               arguments:
                 to: ref('stg_humana__member_eligibility')
                 field: member_id
+              config: *warn
       - name: beneficiary_mbi
         description: "MBI. Medicare Beneficiary Identifier."
         data_tests: [not_null]
       - name: contract_id
         description: "CONTRACT_ID. MA contract the claim was paid under."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: plan_benefit_package_id
         description: "PBP_ID. Plan benefit package."
       - name: claim_status_code
@@ -198,7 +218,9 @@ models:
         description: "PLACE_OF_SERVICE. CMS place-of-service code; professional only."
       - name: billing_npi
         description: "BILLING_NPI."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: billing_tin
         description: "BILLING_TIN. Billing provider tax ID."
       - name: rendering_npi
@@ -214,16 +236,22 @@ models:
         data_tests: *yes_no
       - name: capitated_flag
         description: "CAPITATED_FLAG. Y = capitated encounter (paid_amount 0, no paid_date)."
-        data_tests: *yes_no
+        data_tests:  # STOP: drives is_capitated in int_humana__claim_families
+          - accepted_values:
+              arguments:
+                values: ["Y", "N"]
       - name: icd_version_indicator
         description: "ICD_VERSION. 0 = ICD-10."
         data_tests:
           - accepted_values:
               arguments:
                 values: ["0"]
+              config: *warn
       - name: diagnosis_1_code
         description: "DX_CODE_1. Principal diagnosis (ICD-10-CM, no decimal point)."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: diagnosis_2_code
         description: "DX_CODE_2. Further diagnoses fill DX_CODE_3..12 (diagnosis_3_code..diagnosis_12_code)."
       - name: claim_start_date
@@ -231,14 +259,18 @@ models:
         data_tests: [not_null]
       - name: claim_end_date
         description: "SERVICE_TO_DT. Last service date on the claim."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: line_start_date
         description: "LINE_FROM_DT."
       - name: line_end_date
         description: "LINE_TO_DT."
       - name: received_date
         description: "RECEIVED_DT. Date the payer received the claim."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: processed_date
         description: "PROCESSED_DT. Adjudication date; the claim is delivered in this month."
         data_tests: [not_null]
@@ -246,7 +278,9 @@ models:
         description: "PAID_DT. NULL on denied and capitated lines."
       - name: billed_amount
         description: "BILLED_AMT. Billed charges; negated on reversals."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: allowed_amount
         description: "ALLOWED_AMT. Contracted allowed amount; negated on reversals."
         data_tests: [not_null]

@@ -2,6 +2,9 @@
 # Each description starts with the original CMS column name.
 # Tests here check what staging promises (keys, types, code domains, delivery rules);
 # netting cancellations/adjustments and current-state logic are tested downstream.
+# Severity (macros/test_scoping.sql): tests are STOPs by default (dbt severity error;
+# downstream intermediate models are skipped). `config: *warn` marks a WARN: logged,
+# nothing skipped, scoped to the delivery months being processed.
 
 models:
   - name: stg_cclf__claims_header
@@ -25,7 +28,9 @@ models:
         description: "BENE_HIC_NUM. Legacy Health Insurance Claim number (synthetic)."
       - name: facility_ccn
         description: "PRVDR_OSCAR_NUM. Facility CMS Certification Number (OSCAR)."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: &warn {severity: warn, where: "__in_batch__"}
       - name: facility_npi
         description: "FAC_PRVDR_NPI_NUM. Facility NPI."
       - name: attending_npi
@@ -35,10 +40,12 @@ models:
       - name: claim_type_code
         description: "CLM_TYPE_CD. 10 home health, 20 SNF, 30 swing bed, 40 outpatient, 50 hospice, 60 inpatient."
         data_tests:
-          - not_null
+          - not_null:
+              config: *warn
           - accepted_values:
               arguments:
                 values: ["10", "20", "30", "40", "50", "60"]
+              config: *warn
       - name: adjustment_type_code
         description: "CLM_ADJSMT_TYPE_CD. 0 original, 1 cancellation, 2 adjustment."
         data_tests:
@@ -68,7 +75,9 @@ models:
         description: "CLM_NCH_PRMRY_PYR_CD. Primary payer if not Medicare."
       - name: principal_diagnosis_code
         description: "PRNCPL_DGNS_CD. Principal diagnosis, ICD-10-CM without the decimal point."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: admitting_diagnosis_code
         description: "ADMTG_DGNS_CD. Admitting diagnosis, ICD-10-CM without the decimal point."
       - name: icd_version_indicator
@@ -78,12 +87,16 @@ models:
         data_tests: [not_null]
       - name: claim_end_date
         description: "CLM_THRU_DT. Last date of service."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: claim_effective_date
         description: "CLM_EFCTV_DT. Claim effective date."
       - name: claim_load_date
         description: "CLM_IDR_LD_DT. Date CMS loaded the claim version; always inside the delivery month."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: payment_amount
         description: "CLM_PMT_AMT. Medicare paid amount; negative on cancellations."
         data_tests: [not_null]
@@ -126,6 +139,7 @@ models:
               arguments:
                 to: ref('stg_cclf__claims_header')
                 field: claim_id
+              config: *warn
       - name: diagnosis_sequence_number
         description: "CLM_VAL_SQNC_NUM. Position on the claim (0 = principal)."
         data_tests: [not_null]
@@ -144,15 +158,19 @@ models:
           - accepted_values:
               arguments:
                 values: ["P", "D"]
+              config: *warn
       - name: diagnosis_code
         description: "CLM_DGNS_CD. ICD-10-CM without the decimal point."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: present_on_admission_indicator
         description: "CLM_POA_IND. Y, N, U, W, or NULL (not reported)."
         data_tests:
           - accepted_values:
               arguments:
                 values: ["Y", "N", "U", "W"]
+              config: *warn
       - name: icd_version_indicator
         description: "DGNS_PRCDR_ICD_IND. 0 = ICD-10."
       - name: claim_start_date
@@ -191,7 +209,9 @@ models:
         description: "BENE_HIC_NUM. Legacy Health Insurance Claim number (synthetic)."
       - name: rendering_npi
         description: "RNDRG_PRVDR_NPI_NUM. Rendering provider NPI."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: rendering_provider_tin
         description: "CLM_RNDRG_PRVDR_TAX_NUM. Rendering provider tax ID (synthetic)."
       - name: rendering_provider_type_code
@@ -206,6 +226,7 @@ models:
           - accepted_values:
               arguments:
                 values: ["71"]
+              config: *warn
       - name: adjustment_type_code
         description: "CLM_ADJSMT_TYPE_CD. 0 original, 1 cancellation, 2 adjustment."
         data_tests:
@@ -219,7 +240,9 @@ models:
         description: "CLM_PRCSG_IND_CD. Line processing indicator (A = allowed)."
       - name: hcpcs_code
         description: "CLM_LINE_HCPCS_CD. HCPCS/CPT procedure code."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: hcpcs_modifier_1_code
         description: "HCPCS_1_MDFR_CD. First HCPCS modifier."
       - name: type_of_service_code
@@ -253,7 +276,9 @@ models:
         description: "CLM_EFCTV_DT. Claim effective date."
       - name: claim_load_date
         description: "CLM_IDR_LD_DT. Date CMS loaded the claim version; always inside the delivery month."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: line_paid_amount
         description: "CLM_LINE_CVRD_PD_AMT. Line paid amount; negative on cancellations."
         data_tests: [not_null]
@@ -281,10 +306,14 @@ models:
         data_tests: [not_null]
       - name: beneficiary_hicn
         description: "BENE_HIC_NUM. Legacy Health Insurance Claim number (synthetic)."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: birth_date
         description: "BENE_DOB."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: death_date
         description: "BENE_DEATH_DT. NULL while alive."
       - name: age
@@ -295,6 +324,7 @@ models:
           - accepted_values:
               arguments:
                 values: ["0", "1", "2"]
+              config: *warn
       - name: race_code
         description: "BENE_RACE_CD. CMS race code."
       - name: first_name
@@ -331,7 +361,9 @@ models:
         description: "BENE_PART_B_ENRLMT_BGN_DT. NULL if not enrolled in Part B."
       - name: coverage_start_date
         description: "BENE_RNG_BGN_DT. Start of the beneficiary's range (attribution, or return from Medicare Advantage); no claims before it."
-        data_tests: [not_null]
+        data_tests:
+          - not_null:
+              config: *warn
       - name: coverage_end_date
         description: "BENE_RNG_END_DT. End of the range; filled in on death or when the beneficiary leaves FFS for Medicare Advantage (no claims after it)."
       - name: record_change_type
@@ -342,6 +374,7 @@ models:
           - accepted_values:
               arguments:
                 values: ["NEW", "UPDATE"]
+              config: *warn
       - *delivery_month
       - *source_file
       - *source_row_number

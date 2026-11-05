@@ -2,22 +2,24 @@
 -- eligibility file with its as-of date (FILE_AS_OF_DT). Both must fall inside the
 -- delivery month; a row here means a file landed in the wrong month's partition.
 -- A claim can't be processed before it was received.
+-- WARN (macros/test_scoping.sql): the intermediate layer stays correct; scoped to the batch.
+{{ config(severity='warn') }}
 
 select 'medical_claim_lines' as model, claim_id as row_key, processed_date as checked_date,
        delivery_month, 'processed_date outside delivery month' as problem
 from {{ ref('stg_humana__medical_claim_lines') }}
-where date_trunc('month', processed_date) <> delivery_month
+where date_trunc('month', processed_date) <> delivery_month and {{ in_batch() }}
 
 union all
 
 select 'medical_claim_lines', claim_id, received_date, delivery_month,
        'received after processed'
 from {{ ref('stg_humana__medical_claim_lines') }}
-where received_date > processed_date
+where received_date > processed_date and {{ in_batch() }}
 
 union all
 
 select 'member_eligibility', member_id, file_as_of_date, delivery_month,
        'file_as_of_date outside delivery month'
 from {{ ref('stg_humana__member_eligibility') }}
-where date_trunc('month', file_as_of_date) <> delivery_month
+where date_trunc('month', file_as_of_date) <> delivery_month and {{ in_batch() }}
