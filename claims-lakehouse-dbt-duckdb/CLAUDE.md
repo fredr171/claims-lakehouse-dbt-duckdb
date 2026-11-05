@@ -446,8 +446,11 @@ ticket result recorded.
       which matches both answer keys through 2023-04
 - [x] 2026-11-05: transform retry backoff (2/5/10 min instead of the 1-hour visibility
       timeout) + dbt locks fix for ThreadPool (PR #8), deployed
-- [ ] Transform reports -> GitHub issues (notifier extension) + CloudWatch alarms (DLQs,
-      EventBridge FailedInvocations, ingest errors, transform killed) -> SNS -> notifier ->
-      GitHub issues; no email (decided 2026-11-05). Built on branch transform-github-issues
+- [x] 2026-11-05: transform reports -> GitHub issues (notifier extension) + 5 CloudWatch
+      alarms (transform DLQ, events delivery failed / undelivered, ingest errors, transform
+      killed) -> SNS claims-etl-alerts -> notifier -> GitHub issues; no email (PR #9).
+      Deployed (terraform apply: 12 added, 5 changed; no drift after). Live test: forced
+      claims-etl-ingest-errors to ALARM -> issue #10 opened, CloudWatch returned it to OK ->
+      #10 commented + closed. A real stopped/error transform report has not happened yet
 - [ ] Marts to s3://fredr-claims-marts-2026 (external materialization)
 - [ ] Move Terraform state to an S3 backend before CI
