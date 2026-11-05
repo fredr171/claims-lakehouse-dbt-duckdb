@@ -1,0 +1,46 @@
+# Humana MA member eligibility: one row per member per delivery in which the
+# member is new, changed or terminated (full row, current values).
+# expected_columns copied verbatim from the header of
+# HUM_ELIG_202301.csv (inspected 2026-11-04; identical in all 36 months).
+landing_prefix: humana/ma/
+file_type: member_eligibility
+
+# Named groups are available to raw_key_template. Raw is partitioned by
+# delivery month (from the file name), never by claim or enrollment dates.
+file_name_regex: '^HUM_ELIG_(?P<year>\d{4})(?P<month>0[1-9]|1[0-2])\.csv$'
+raw_key_template: 'humana/ma/member_eligibility/delivery_month={year}-{month}/part-0.parquet'
+
+# MEMBER_ID is the payer's member key. MBI (the Medicare ID, used to match
+# members across payers) is checked in dbt staging, not here.
+key_columns:
+  - MEMBER_ID
+
+expected_columns:
+  - MEMBER_ID
+  - MBI
+  - FIRST_NAME
+  - MIDDLE_INITIAL
+  - LAST_NAME
+  - DOB
+  - GENDER
+  - ADDRESS_LINE_1
+  - CITY
+  - STATE
+  - ZIP
+  - COUNTY_FIPS
+  - CONTRACT_ID
+  - PBP_ID
+  - PLAN_NAME
+  - PRODUCT_TYPE
+  - ENROLLMENT_START_DT
+  - ENROLLMENT_END_DT
+  - PCP_NPI
+  - PCP_TIN
+  - PCP_ATTRIBUTION_START_DT
+  - DUAL_FLAG
+  - LIS_FLAG
+  - ESRD_FLAG
+  - HOSPICE_FLAG
+  - DEATH_DT
+  - FILE_AS_OF_DT
+  - RECORD_CHANGE_TYPE

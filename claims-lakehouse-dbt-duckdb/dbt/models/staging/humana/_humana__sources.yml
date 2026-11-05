@@ -1,0 +1,24 @@
+sources:
+  - name: humana
+    description: >
+      Raw (bronze) Humana Medicare Advantage deliveries written by the ingestion Lambda:
+      one Parquet file per file type per delivery month, every source column as VARCHAR
+      exactly as delivered, plus ingestion metadata columns. Partitioned by
+      delivery_month (from the file name). Field names are invented by the synthetic
+      generator (Humana's real layouts are proprietary).
+    config:
+      # {name} is the table name below; humana_raw_root defaults to the S3 raw bucket
+      # (dbt_project.yml) and tests point it at a local folder. Partition value stays text.
+      external_location: >-
+        read_parquet('{{ var("humana_raw_root") }}/{name}/*/*.parquet',
+        hive_partitioning = true, hive_types_autocast = false)
+      loaded_at_field: _ingested_at
+      freshness:
+        # Monthly deliveries: warn when a month is missed, error after two.
+        warn_after: {count: 35, period: day}
+        error_after: {count: 65, period: day}
+    tables:
+      - name: member_eligibility
+        description: "HUM_ELIG_YYYYMM.csv: members new, changed or terminated that month (full rows)."
+      - name: medical_claim_lines
+        description: "HUM_MEDCLM_YYYYMM.csv: medical claim lines, institutional and professional, one row per line per claim version."

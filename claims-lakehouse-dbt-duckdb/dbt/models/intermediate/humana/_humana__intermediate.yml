@@ -1,0 +1,168 @@
+# Humana intermediate: state that spans deliveries. Same incremental-by-affected-key
+# pattern as the CMS models (macros/incremental_by_affected_keys.sql); an incremental run
+# must equal a full rebuild, which tests/test_dbt_intermediate.py checks.
+
+models:
+  - name: int_humana__member_versions
+    description: >
+      Humana member history (SCD type 2) from HUM_ELIG. One row per member per version;
+      a version starts when any tracked attribute changes (hash comparison). change_type
+      is derived: NEW, UPDATE, or TERM (enrollment_end_date first set). valid_to is
+      exclusive and NULL while current. Contains synthetic names/addresses: never select
+      them into marts.
+    columns:
+      - name: member_version_id
+        description: "member_id | valid_from (YYYY-MM). Unique per version."
+        data_tests: [not_null, unique]
+      - name: member_id
+        description: "Humana member ID."
+        data_tests:
+          - not_null
+          - unique:
+              config:
+                where: "is_current"
+      - name: version_number
+        description: "1 for the first delivered version, then +1 per change."
+        data_tests: [not_null]
+      - name: valid_from
+        description: "Delivery month the version arrived (inclusive)."
+        data_tests: [not_null]
+      - name: valid_to
+        description: "Delivery month the next version arrived (exclusive); NULL while current."
+      - name: is_current
+        description: "True for the latest version of each member."
+      - name: change_type
+        description: "Derived: NEW (version 1), TERM (enrollment end date first set), else UPDATE."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["NEW", "UPDATE", "TERM"]
+      - name: changed_columns
+        description: "Tracked columns that differ from the previous version (empty for NEW)."
+      - name: is_terminated
+        description: "Enrollment has ended (enrollment_end_date set)."
+      - name: beneficiary_mbi
+        description: "MBI; links the member to CCLF history for FFS <-> MA switchers."
+        data_tests: [not_null]
+      - name: attribute_hash
+        description: "md5 of the tracked attributes; equal hashes = no change."
+      - name: last_delivered_month
+        description: "Latest delivery that carried this version."
+      - name: last_file_as_of_date
+        description: "Newest FILE_AS_OF_DT among the rows collapsed into this version."
+      - name: delivery_count
+        description: "Delivered HUM_ELIG rows collapsed into this version."
+      - name: _source_checksums
+        description: "Sorted SHA-256s of the raw files this version was built from (drives incremental runs)."
+
+  - name: int_humana__claim_families
+    description: >
+      One row per Humana claim family: the original claim plus any reversal (void) and
+      replacement, keyed by the original's claim_id. net_paid_amount is the sum over
+      every version (reversals are negated), checked against the status rule: voided 0,
+      replaced = the replacement's paid, denied 0, otherwise the original's paid.
+    columns:
+      - name: claim_family_key
+        description: "coalesce(original_claim_id, claim_id) = the original's claim_id."
+        data_tests: [not_null, unique]
+      - name: member_id
+        description: "Member on the family's first version."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('int_humana__member_versions')
+                field: member_id
+      - name: beneficiary_mbi
+        description: "MBI on the family's first version."
+        data_tests: [not_null]
+      - name: contract_id
+        description: "MA contract on the family's first version."
+      - name: claim_form_type_code
+        description: "I = institutional (UB-04), P = professional (CMS-1500)."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["I", "P"]
+      - name: has_original
+        description: >
+          False when only a reversal/replacement was loaded (its original predates the
+          loaded history). Never expected with complete history.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [true]
+              config:
+                severity: warn
+      - name: original_claim_id
+        description: "claim_id of the original version (frequency 1)."
+      - name: original_status_code
+        description: "Original's CLAIM_STATUS: P paid or D denied."
+      - name: original_delivery_month
+        description: "Delivery (processed) month of the original."
+      - name: original_paid_amount
+        description: "Paid on the original (sum of its lines)."
+      - name: original_line_count
+        description: "Lines on the original."
+      - name: is_capitated
+        description: "The original is a capitated encounter (paid 0, allowed populated)."
+      - name: capitated_allowed_amount
+        description: "Allowed amount of a capitated encounter; NULL otherwise."
+      - name: action_type
+        description: "REPLACE (replacement present) or VOID (reversal only); NULL when the original stands."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["REPLACE", "VOID"]
+      - name: action_delivery_month
+        description: "Delivery month of the latest reversal/replacement."
+      - name: replacement_claim_id
+        description: "claim_id of the latest replacement."
+      - name: replacement_paid_amount
+        description: "Paid on the latest replacement."
+      - name: family_status
+        description: "REPLACED (an unreversed replacement), else DENIED/ORIGINAL (unreversed original), else VOIDED."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["ORIGINAL", "DENIED", "VOIDED", "REPLACED"]
+      - name: net_paid_amount
+        description: "What the plan finally paid: sum of paid over every version."
+        data_tests: [not_null]
+      - name: service_start_date
+        description: "The original's claim_start_date (earliest version's if no original)."
+        data_tests: [not_null]
+      - name: service_month
+        description: "First day of the service_start_date month."
+        data_tests: [not_null]
+      - name: version_count
+        description: "Claim versions in the family."
+      - name: original_count
+        description: "Originals in the family; more than one would mean a reused claim_id."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: reversal_count
+        description: "Reversals in the family. The generator sends at most one; more only warns."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+              config:
+                severity: warn
+      - name: replacement_count
+        description: "Replacements in the family. The generator sends at most one; more only warns."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+              config:
+                severity: warn
+      - name: first_delivery_month
+        description: "Earliest delivery with a version of this family."
+      - name: latest_delivery_month
+        description: "Latest delivery with a version of this family."
+      - name: _source_checksums
+        description: "Sorted SHA-256s of the raw files this family was built from (drives incremental runs)."

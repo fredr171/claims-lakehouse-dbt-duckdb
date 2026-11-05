@@ -1,0 +1,29 @@
+sources:
+  - name: cclf
+    description: >
+      Raw (bronze) CCLF deliveries written by the ingestion Lambda: one Parquet file per
+      file type per delivery month, every source column as VARCHAR exactly as delivered,
+      plus ingestion metadata columns. Partitioned by delivery_month (from the file name).
+    config:
+      # {name} is the table name below. hive_types_autocast = false keeps the partition
+      # value as text ('2023-01'); staging turns it into a date. cclf_raw_root defaults
+      # to the S3 raw bucket (dbt_project.yml); tests point it at a local folder.
+      external_location: >-
+        read_parquet('{{ var("cclf_raw_root") }}/{name}/*/*.parquet',
+        hive_partitioning = true, hive_types_autocast = false)
+      loaded_at_field: _ingested_at
+      freshness:
+        # Monthly deliveries: warn when a month is missed, error after two.
+        warn_after: {count: 35, period: day}
+        error_after: {count: 65, period: day}
+    tables:
+      - name: claims_header
+        description: CCLF1 Part A claim header, one row per claim version.
+      - name: claims_diagnosis
+        description: CCLF4 Part A diagnosis codes, 1-6 rows per CCLF1 claim version.
+      - name: part_b_physician_lines
+        description: CCLF5 Part B physician claim lines, 1-4 lines per claim version.
+      - name: beneficiary_demographics
+        description: >
+          CCLF8 beneficiary demographics: each delivery holds only beneficiaries that are
+          new or changed that month, as full rows with current values.

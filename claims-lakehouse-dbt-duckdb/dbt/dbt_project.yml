@@ -1,0 +1,29 @@
+# dbt project: raw CCLF Parquet in S3 -> staging (silver) in DuckDB.
+# Run every dbt command from this folder (profiles.yml and the .duckdb file live here).
+name: claims_lakehouse
+version: "0.1.0"
+profile: claims_lakehouse
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # Raw (bronze) root per feed: <root>/<file_type>/delivery_month=<yyyy-mm>/*.parquet.
+  # Override for offline tests: --vars '{cclf_raw_root: ..., humana_raw_root: ...}'.
+  cclf_raw_root: s3://fredr-claims-raw-2026/cms/cclf
+  humana_raw_root: s3://fredr-claims-raw-2026/humana/ma
+
+models:
+  claims_lakehouse:
+    staging:
+      # Views: staging is a typed, renamed lens over raw, re-read from S3 on every query.
+      +materialized: view
+      +schema: staging
+    intermediate:
+      # Incremental tables: state that spans deliveries (see macros/incremental_by_affected_keys.sql).
+      +materialized: incremental
+      +schema: intermediate
+      +on_schema_change: fail

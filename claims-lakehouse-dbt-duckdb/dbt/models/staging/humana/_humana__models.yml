@@ -1,0 +1,267 @@
+# Staging: one model per Humana file type, one row per raw row (every delivery kept).
+# Each description starts with the delivered column name. Field names are invented by
+# the synthetic generator; Humana's real layouts are proprietary.
+# Tests check what staging promises (keys, types, code domains, delivery rules);
+# member history and claim families (reversal/replacement netting) are tested downstream.
+
+models:
+  - name: stg_humana__member_eligibility
+    description: >
+      HUM_ELIG Medicare Advantage eligibility, typed and renamed. One row per member per
+      delivery in which the member is new, changed or terminated, with full current
+      values. Contains synthetic names/addresses: never select them into marts.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [member_id, delivery_month]
+    columns:
+      - name: member_id
+        description: "MEMBER_ID. Humana member ID (synthetic, H + 9 digits)."
+        data_tests: [not_null]
+      - name: beneficiary_mbi
+        description: "MBI. Medicare Beneficiary Identifier; the same MBI as in CCLF for members who switch between FFS and MA."
+        data_tests: [not_null]
+      - name: first_name
+        description: "FIRST_NAME (synthetic PII)."
+      - name: middle_initial
+        description: "MIDDLE_INITIAL (synthetic PII)."
+      - name: last_name
+        description: "LAST_NAME (synthetic PII)."
+      - name: birth_date
+        description: "DOB."
+        data_tests: [not_null]
+      - name: gender_code
+        description: "GENDER. M or F (CCLF uses 1/2)."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["M", "F"]
+      - name: death_date
+        description: "DEATH_DT. Filled on the member's TERM row after death."
+      - name: address_line_1
+        description: "ADDRESS_LINE_1 (synthetic PII)."
+      - name: city
+        description: "CITY (synthetic PII)."
+      - name: usps_state_code
+        description: "STATE. USPS state abbreviation."
+      - name: zip5_code
+        description: "ZIP. 5-digit ZIP code."
+      - name: county_fips_code
+        description: "COUNTY_FIPS. 5-digit state + county FIPS code (CCLF splits it into 2 + 3 digits)."
+      - name: contract_id
+        description: "CONTRACT_ID. MA contract (synthetic, e.g. H9101)."
+        data_tests: [not_null]
+      - name: plan_benefit_package_id
+        description: "PBP_ID. Plan benefit package within the contract (3 digits, leading zeros)."
+        data_tests: [not_null]
+      - name: plan_name
+        description: "PLAN_NAME (synthetic)."
+      - name: product_type
+        description: "PRODUCT_TYPE. HMO, PPO, or D-SNP (dual-eligible special needs plan)."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["HMO", "PPO", "D-SNP"]
+      - name: enrollment_start_date
+        description: "ENROLLMENT_START_DT. First covered day in this plan."
+        data_tests: [not_null]
+      - name: enrollment_end_date
+        description: "ENROLLMENT_END_DT. Last covered day; NULL while enrolled (set on the TERM row)."
+      - name: pcp_npi
+        description: "PCP_NPI. Attributed primary care provider."
+      - name: pcp_tin
+        description: "PCP_TIN. Attributed PCP's group tax ID."
+      - name: pcp_attribution_start_date
+        description: "PCP_ATTRIBUTION_START_DT."
+      - name: dual_flag
+        description: "DUAL_FLAG. Y = Medicare-Medicaid dual eligible."
+        data_tests: &yes_no
+          - accepted_values:
+              arguments:
+                values: ["Y", "N"]
+      - name: low_income_subsidy_flag
+        description: "LIS_FLAG. Y = Part D low-income subsidy."
+        data_tests: *yes_no
+      - name: esrd_flag
+        description: "ESRD_FLAG. Y = end-stage renal disease."
+        data_tests: *yes_no
+      - name: hospice_flag
+        description: "HOSPICE_FLAG. Y = elected hospice."
+        data_tests: *yes_no
+      - name: file_as_of_date
+        description: "FILE_AS_OF_DT. Eligibility snapshot date; falls in the delivery month."
+        data_tests: [not_null]
+      - name: record_change_type
+        description: >
+          RECORD_CHANGE_TYPE. Synthetic generator helper (NEW/UPDATE/TERM), not a real
+          payer field. Kept only to verify change detection derived downstream.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["NEW", "UPDATE", "TERM"]
+      - &delivery_month
+        name: delivery_month
+        description: "First day of the delivery month, from the raw partition (file name)."
+        data_tests: [not_null]
+      - &source_file
+        name: _source_file
+        description: "Delivered CSV file name (ingestion metadata)."
+      - &source_row_number
+        name: _source_row_number
+        description: "Line number in the delivered CSV (header = line 1)."
+      - &source_checksum
+        name: _source_checksum
+        description: "SHA-256 of the delivered file; joins to the _manifests/<sha256>.json record."
+      - &ingested_at
+        name: _ingested_at
+        description: "UTC time the file was ingested to raw."
+      - &batch_id
+        name: _batch_id
+        description: "Ingestion run ID."
+
+  - name: stg_humana__medical_claim_lines
+    description: >
+      HUM_MEDCLM Medicare Advantage medical claims, typed and renamed. One row per line
+      per claim version: an original (frequency 1), a reversal (8, same claim_id, amounts
+      negated) or a replacement (7, new claim_id). Reversals and replacements point to
+      the original through original_claim_id.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [claim_id, line_number, claim_frequency_code]
+    columns:
+      - name: claim_id
+        description: "CLAIM_ID. Claim number; a reversal reuses the original's."
+        data_tests: [not_null]
+      - name: line_number
+        description: "CLAIM_LINE_NUM. Line within the claim, starting at 1."
+        data_tests: [not_null]
+      - name: original_claim_id
+        description: "ORIG_CLAIM_ID. The original's claim_id on reversals/replacements; NULL on originals (claim family key)."
+      - name: member_id
+        description: "MEMBER_ID. Humana member ID."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_humana__member_eligibility')
+                field: member_id
+      - name: beneficiary_mbi
+        description: "MBI. Medicare Beneficiary Identifier."
+        data_tests: [not_null]
+      - name: contract_id
+        description: "CONTRACT_ID. MA contract the claim was paid under."
+        data_tests: [not_null]
+      - name: plan_benefit_package_id
+        description: "PBP_ID. Plan benefit package."
+      - name: claim_status_code
+        description: "CLAIM_STATUS. P = paid, D = denied, R = reversed."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["P", "D", "R"]
+      - name: claim_frequency_code
+        description: "CLAIM_FREQ_CD. 1 = original, 7 = replacement, 8 = void/reversal."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["1", "7", "8"]
+      - name: claim_form_type_code
+        description: "CLAIM_FORM_TYPE. I = institutional (UB-04), P = professional (CMS-1500)."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["I", "P"]
+      - name: bill_type_code
+        description: "BILL_TYPE. 3-digit UB-04 type of bill (last digit = frequency); institutional only."
+      - name: admission_date
+        description: "ADMIT_DT. Inpatient/SNF stays only."
+      - name: discharge_date
+        description: "DISCHARGE_DT. Inpatient/SNF stays only."
+      - name: admission_type_code
+        description: "ADMIT_TYPE."
+      - name: admission_source_code
+        description: "ADMIT_SOURCE."
+      - name: patient_discharge_status_code
+        description: "DISCHARGE_STATUS. Institutional only (2 digits)."
+      - name: drg_code
+        description: "DRG_CD. MS-DRG on inpatient claims (3 digits, leading zeros)."
+      - name: revenue_center_code
+        description: "REVENUE_CD. UB-04 revenue code (4 digits, leading zero); institutional only."
+      - name: procedure_code
+        description: "PROCEDURE_CD. CPT/HCPCS code."
+      - name: procedure_modifier_1_code
+        description: "MODIFIER_1."
+      - name: service_unit_quantity
+        description: "UNITS. Service units on the line."
+      - name: place_of_service_code
+        description: "PLACE_OF_SERVICE. CMS place-of-service code; professional only."
+      - name: billing_npi
+        description: "BILLING_NPI."
+        data_tests: [not_null]
+      - name: billing_tin
+        description: "BILLING_TIN. Billing provider tax ID."
+      - name: rendering_npi
+        description: "RENDERING_NPI. Professional only."
+      - name: attending_npi
+        description: "ATTENDING_NPI. Institutional only."
+      - name: facility_ccn
+        description: "FACILITY_CCN. Facility CMS Certification Number; institutional only."
+      - name: provider_specialty_code
+        description: "PROVIDER_SPECIALTY. CMS specialty code; professional only."
+      - name: in_network_flag
+        description: "IN_NETWORK_FLAG. N = out-of-network."
+        data_tests: *yes_no
+      - name: capitated_flag
+        description: "CAPITATED_FLAG. Y = capitated encounter (paid_amount 0, no paid_date)."
+        data_tests: *yes_no
+      - name: icd_version_indicator
+        description: "ICD_VERSION. 0 = ICD-10."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["0"]
+      - name: diagnosis_1_code
+        description: "DX_CODE_1. Principal diagnosis (ICD-10-CM, no decimal point)."
+        data_tests: [not_null]
+      - name: diagnosis_2_code
+        description: "DX_CODE_2. Further diagnoses fill DX_CODE_3..12 (diagnosis_3_code..diagnosis_12_code)."
+      - name: claim_start_date
+        description: "SERVICE_FROM_DT. First service date on the claim."
+        data_tests: [not_null]
+      - name: claim_end_date
+        description: "SERVICE_TO_DT. Last service date on the claim."
+        data_tests: [not_null]
+      - name: line_start_date
+        description: "LINE_FROM_DT."
+      - name: line_end_date
+        description: "LINE_TO_DT."
+      - name: received_date
+        description: "RECEIVED_DT. Date the payer received the claim."
+        data_tests: [not_null]
+      - name: processed_date
+        description: "PROCESSED_DT. Adjudication date; the claim is delivered in this month."
+        data_tests: [not_null]
+      - name: paid_date
+        description: "PAID_DT. NULL on denied and capitated lines."
+      - name: billed_amount
+        description: "BILLED_AMT. Billed charges; negated on reversals."
+        data_tests: [not_null]
+      - name: allowed_amount
+        description: "ALLOWED_AMT. Contracted allowed amount; negated on reversals."
+        data_tests: [not_null]
+      - name: paid_amount
+        description: "PAID_AMT. Plan paid amount; 0 on denied/capitated lines, negated on reversals."
+        data_tests: [not_null]
+      - name: copay_amount
+        description: "COPAY_AMT. Member copay."
+      - name: coinsurance_amount
+        description: "COINSURANCE_AMT. Member coinsurance."
+      - name: deductible_amount
+        description: "DEDUCTIBLE_AMT. Member deductible."
+      - *delivery_month
+      - *source_file
+      - *source_row_number
+      - *source_checksum
+      - *ingested_at
+      - *batch_id

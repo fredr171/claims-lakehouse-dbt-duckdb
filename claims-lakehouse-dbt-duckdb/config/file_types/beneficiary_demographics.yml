@@ -1,0 +1,41 @@
+# CCLF8 beneficiary demographics: one CSV per monthly delivery (one row per beneficiary per delivery in which it is new or changed).
+# expected_columns copied verbatim from the header of
+# CCLF8_202301.csv (inspected 2026-11-04; identical in all 36 months).
+landing_prefix: cms/cclf/
+file_type: beneficiary_demographics
+
+# Named groups are available to raw_key_template. Raw is partitioned by
+# delivery month (from the file name), never by claim dates.
+file_name_regex: '^CCLF8_(?P<year>\d{4})(?P<month>0[1-9]|1[0-2])\.csv$'
+raw_key_template: 'cms/cclf/beneficiary_demographics/delivery_month={year}-{month}/part-0.parquet'
+
+key_columns:
+  - BENE_MBI_ID
+
+expected_columns:
+  - BENE_MBI_ID
+  - BENE_HIC_NUM
+  - BENE_FIPS_STATE_CD
+  - BENE_FIPS_CNTY_CD
+  - BENE_ZIP_CD
+  - BENE_DOB
+  - BENE_SEX_CD
+  - BENE_RACE_CD
+  - BENE_AGE
+  - BENE_MDCR_STUS_CD
+  - BENE_DUAL_STUS_CD
+  - BENE_DEATH_DT
+  - BENE_RNG_BGN_DT
+  - BENE_RNG_END_DT
+  - BENE_1ST_NAME
+  - BENE_MIDL_NAME
+  - BENE_LAST_NAME
+  - BENE_ORGNL_ENTLMT_RSN_CD
+  - BENE_ENTLMT_BUYIN_IND
+  - BENE_PART_A_ENRLMT_BGN_DT
+  - BENE_PART_B_ENRLMT_BGN_DT
+  - BENE_LINE_1_ADR
+  - GEO_ZIP_PLC_NAME
+  - GEO_USPS_STATE_CD
+  - GEO_ZIP5_CD
+  - RECORD_CHANGE_TYPE

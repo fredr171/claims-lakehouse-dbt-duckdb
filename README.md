@@ -1,212 +1,380 @@
-# Claims Lakehouse: dbt + DuckDB on S3
+# Synthetic payer test-file generators (CCLF + Humana MA)
 
-An end-to-end ETL pipeline for **synthetic** Medicare claims (CMS DE-SynPUF 2008–2010,
-Sample 1). No real claims, PHI, or PII are used anywhere.
+Two seeded, fully synthetic generators that feed the same lakehouse:
 
-```
-landing (S3, .zip)  ──►  raw / bronze (S3, Parquet)  ──►  staging + intermediate / silver (DuckDB via dbt)  ──►  marts / gold (S3, Parquet)
-   └── ingestion (this repo, Python) ──┘                     └──────────────── dbt-duckdb (next) ────────────────┘
-```
+- **`generate_cclf.py`**: CMS **CCLF** (Claim and Claim Line Feed) monthly deliveries
+  for Medicare fee-for-service (FFS) beneficiaries.
+- **`generate_humana.py`**: Humana-style **Medicare Advantage** (MA) eligibility and
+  medical-claims extracts.
 
-| Layer | Location | Format |
+Both draw their people from one shared member registry, so beneficiaries who switch
+between FFS and MA keep the same MBI, name, DOB and address in both feeds, with no
+overlapping coverage. Use them to practice incremental ETL: change capture,
+late-arriving facts, claim reversals and adjustments, referential integrity, and
+cross-payer member matching.
+
+Nothing here is real: names, addresses, MBIs, HICNs, member IDs, NPIs, CCNs, TINs,
+contract IDs and plan names are all generated. Any match to a real person, provider,
+facility or plan is coincidental.
+
+| File | Content | Grain |
 |---|---|---|
-| landing | `s3://fredr-claims-landing-2026` | `.zip` as delivered |
-| raw (bronze) | `s3://fredr-claims-raw-2026` | Parquet, all source columns as string |
-| staging/intermediate (silver) | DuckDB (dbt models) | tables / views |
-| marts (gold) | `s3://fredr-claims-marts-2026` | Parquet |
+| CCLF8 | Beneficiary demographics | one row per beneficiary per delivery in which it is new or changed |
+| CCLF1 | Part A claim header | one row per claim version |
+| CCLF4 | Part A diagnosis codes | 1–6 rows per CCLF1 claim version |
+| CCLF5 | Part B physician claim lines | 1–4 lines per claim version |
+| HUM_ELIG | MA member eligibility | one row per member per delivery in which it is new, changed or terminated |
+| HUM_MEDCLM | MA medical claims (UB-04 and CMS-1500) | one row per claim line per claim version |
 
-All buckets are in `us-east-2` with Block Public Access and SSE-S3 encryption.
-
-## Ingestion: landing → raw
-
-`process_zip(s3_key)` in [`src/claims_etl/ingestion/pipeline.py`](src/claims_etl/ingestion/pipeline.py):
-
-1. **Download + SHA-256.** If `_manifests/<sha256>.json` already says `success`, the outcome is
-   `skipped_duplicate` and the zip is archived.
-2. **Validate**: file, archive, and CSV checks run in order and stop at the first failure (below).
-   A failure moves the zip to `quarantine/`, writes `<zip>.error.json` next to it, and records
-   `quarantined`.
-3. **Write Parquet locally**: every source column as `string` (codes keep their leading zeros:
-   `SP_STATE_CODE = "05"`), plus `_source_uri`, `_source_file`, `_source_checksum`,
-   `_source_row_number`, `_ingested_at` (UTC), `_batch_id`.
-4. **Reconcile**: the Parquet footer row count must equal the CSV data row count before anything
-   is published.
-5. **Publish**: upload to a deterministic key (re-runs overwrite rather than duplicate), write
-   the manifest, and move the zip to `archive/`.
-
-Data problems end in `quarantined`. Infrastructure problems (S3, network) end in `error`, and the
-zip stays in landing so the next run retries it.
-
-### Validation checks
-
-| Level | Check | Fails when |
-|---|---|---|
-| file | `known_file_type` | key is not `cms/desynpuf/<configured type>/<zip>` |
-| file | `file_name` | name does not match the type's regex (captures `year`, `sample`) |
-| file | `file_size` | 0 bytes or above the configured maximum |
-| archive | `zip_opens` | not a readable zip |
-| archive | `member_paths` | absolute path, `..` traversal, or nested archive |
-| archive | `expected_member` | anything other than exactly the expected CSV |
-| archive | `uncompressed_size` / `compression_ratio` | above limits (zip-bomb guard) |
-| archive | `zip_crc` | CRC-32 mismatch |
-| CSV | `csv_utf8` / `csv_parseable` | not UTF-8, or malformed quoting |
-| CSV | `csv_header` | names or order differ from config |
-| CSV | `csv_field_counts` | any row's field count differs from the header's |
-| CSV | `csv_row_count` | no data rows |
-| CSV | `csv_key_columns` | empty key (e.g. `DESYNPUF_ID`) |
-| post-write | `row_count_reconciliation` | Parquet rows ≠ CSV rows |
-
-Row-level data quality (code formats, dates, amounts) belongs in dbt staging tests, not here.
-
-### S3 layout
+## Repository layout
 
 ```
-landing   cms/desynpuf/<file_type>/<zip>                       ← drop new files here
-          archive/cms/desynpuf/<file_type>/<zip>               ← processed
-          quarantine/cms/desynpuf/<file_type>/<zip>[.error.json]
-raw       cms/desynpuf/beneficiary_summary/year=<yyyy>/sample=<n>/part-0.parquet
-          _manifests/<sha256>.json
+.                                    generators (this README)
+├── generate_cclf.py, validate_cclf.py, cclf_common.py
+├── generate_humana.py, validate_humana.py, humana_common.py
+├── validate_crosspayer.py           FFS <-> MA consistency checks
+├── member_registry.py               shared people, coverage spans, switchers, providers
+├── clinical_reference.py            shared diagnosis codes, DRGs, HCPCS fees
+├── output/YYYY-MM/CCLF*_YYYYMM.csv  CCLF files (seed 42)
+├── output/humana/YYYY-MM/HUM_*.csv  Humana files (seed 42)
+├── answer_key/                      CCLF expected results + crossover_members.csv
+├── answer_key/humana/               Humana expected results
+├── tests/                           test_cclf_generator.py, test_humana_generator.py
+└── claims-lakehouse-dbt-duckdb/     AWS lakehouse ETL (S3 + Lambda + Terraform +
+                                     dbt-duckdb); see its own README.md
 ```
 
-### Adding a file type
+Commands for the lakehouse project (pytest, ruff, `scripts/build_lambda.py`,
+`terraform`, the `claims-ingest` / `claims-notify` CLIs) run from inside
+`claims-lakehouse-dbt-duckdb/`. Its `.env` is found from the working directory.
 
-Add `config/file_types/<file_type>.yml` with the naming regex (named groups), the CSV member
-and raw key templates, the expected columns (copied from the real header), and the key columns.
-The config is validated on load (for example, a template may only use groups the regex captures).
-
-## Running it
+## Regenerate
 
 ```bash
-python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev]"     # Windows; use .venv/bin on macOS/Linux
-
-# credentials come from the AWS CLI default profile (aws configure)
-.venv/Scripts/python -m claims_etl.ingestion.cli --key cms/desynpuf/beneficiary_summary/DE1_0_2008_Beneficiary_Summary_File_Sample_1.zip
-.venv/Scripts/python -m claims_etl.ingestion.cli --scan
+python generate_cclf.py   --seed 42 --start 2023-01 --end 2025-12
+python generate_humana.py --seed 42 --start 2023-01 --end 2025-12
+python validate_cclf.py
+python validate_humana.py
+python validate_crosspayer.py
 ```
 
-JSON-lines logs go to stderr, and a JSON summary of manifest records goes to stdout. Exit codes:
-`0` all success/skipped, `2` something was quarantined, `1` an error occurred.
+Standard library only (no Faker). Same seed + months = byte-identical output
+(covered by the tests). **Use the same `--seed`, `--start` and `--end` for both
+generators**, or the switchers will not line up. Options:
 
-## Quarantine notifications (GitHub issues)
+- both: `--seed`, `--start`, `--end` (YYYY-MM)
+- `generate_cclf.py`: `--output-dir` (default `output/`), `--answer-key-dir` (default
+  `answer_key/`)
+- `generate_humana.py`: `--output-dir` (default `output/humana/`), `--answer-key-dir`
+  (default `answer_key/humana/`), `--crossover-dir` (default `answer_key/`)
 
-A decoupled notifier turns each quarantine report (`quarantine/.../<zip>.zip.error.json`) into
-a GitHub issue. Ingestion doesn't change, and a GitHub outage can't affect loading or quarantine.
+Re-running deletes and replaces that generator's CSVs only. `generate_cclf.py`
+ignores `output/humana/` and vice versa. Both write the same
+`answer_key/crossover_members.csv`.
 
-- **One issue per checksum.** Before opening an issue it looks for an *open* `quarantine` issue
-  whose body has the line ``Checksum: `<sha256>` ``. The lookup uses the Issues list endpoint, not
-  search, which lags. If it finds one, it adds a "quarantined again" comment instead.
-- **Ticket record:** `s3://fredr-claims-raw-2026/_tickets/<sha256>.json` stores the issue URL and
-  number and every batch already notified. It's kept apart from the manifest, which only
-  ingestion writes. Re-running for the same event makes no API calls.
-- **Public-safe content.** Issues carry check names, counts, line numbers, column names, and file
-  metadata. Row values are redacted, for example when a headerless file's first data row would be
-  read as column names. Details are truncated and rendered as code so they can't @mention anyone.
-- **Resilient.** It retries 5xx/429/rate-limited responses with backoff, honoring `Retry-After` and
-  `x-ratelimit-reset`. It never logs the token. Failures exit non-zero, and `--scan` retries later.
-- **Configurable:** labels, title template, and per-check next steps live in
-  `config/notifications.yml`. Moving to Jira would only replace `github_client.py`.
+## Shared member registry and payer switchers
 
-```bash
-cp .env.example .env    # then set GITHUB_TOKEN (fine-grained, this repo only, Issues: read/write)
-.venv/Scripts/python -m claims_etl.notifications.cli --scan
-.venv/Scripts/python -m claims_etl.notifications.cli --error-key quarantine/cms/desynpuf/<type>/<zip>.zip.error.json
-```
+`member_registry.py` builds every person once from the seed (stream
+`registry:<seed>`), with a list of coverage spans `(payer, start, end)`:
 
-In AWS, the `claims-etl-notify` Lambda ([`infra/terraform/notifier.tf`](infra/terraform/notifier.tf))
-runs this automatically for every new `quarantine/*.error.json`. It reads `GITHUB_TOKEN` from SSM
-Parameter Store (`/claims-etl/GITHUB_TOKEN`, a SecureString created outside Terraform so the token
-never lands in Terraform state) and `GITHUB_REPO` from a Terraform-managed parameter. A failure
-raises, so Lambda retries it twice. S3 triggers don't fire for files that already exist, so after
-an outage run `--scan` once.
+- FFS population: 118 at the start, 7–10 newly attributed per month.
+- MA (Humana) population: 88 at the start, 2–3 new enrollees per month (4–7 each
+  January). About 6% leave Humana for another MA plan each January 1.
+- **Switchers** (15–20 people; 17 for seed 42), listed in
+  `answer_key/crossover_members.csv` (`BENE_MBI_ID, MEMBER_ID, direction,
+  effective_date, enrollment_period`):
+  - most go **FFS → MA on January 1** (Annual Election Period) of 2024 or 2025;
+  - 3 switch **mid-year** (effective February–April 1; MA Open Enrollment / SEP);
+  - 3 go **MA → FFS on January 1** (2 are round trips: FFS → MA → FFS).
+- Coverage never overlaps: the old span ends the day before the new one starts. Each
+  generator only produces claims inside its own payer's spans.
+- Switchers do not die or get random demographic updates. Their address moves are
+  planned in the registry, so both feeds report the same address at every handoff.
+- Providers come from one pool. Shared hospitals, SNF and professionals appear in both
+  feeds; HHA and hospice are FFS-only; a few Humana-only providers (a primary-care
+  group and a cardiology group) plus one out-of-network hospital and one
+  out-of-network urgent-care physician appear only in Humana claims.
 
-One-time token setup (PowerShell, from the project folder; reads the token from `.env`):
+---
 
-```powershell
-$t = (Select-String -Path .env -Pattern '^GITHUB_TOKEN=(.+)$').Matches[0].Groups[1].Value
-aws ssm put-parameter --region us-east-2 --name /claims-etl/GITHUB_TOKEN --type SecureString --value $t
-Remove-Variable t
-```
+# CCLF (Medicare FFS)
 
-## Automatic ingestion (AWS Lambda)
+## Format
 
-Uploading a `.zip` under `s3://fredr-claims-landing-2026/cms/desynpuf/` triggers the
-`claims-etl-ingest` Lambda, which runs the same `process_zip`. It's defined in
-[`infra/terraform/`](infra/terraform/):
+- `output/YYYY-MM/CCLF{8,1,4,5}_YYYYMM.csv`: 36 months × 4 files = 144 files.
+- CSV with header row, comma-delimited, UTF-8 (ASCII in practice), LF line endings,
+  empty string = missing. Real CCLF is fixed-width; CSV is intentional here.
+- Dates `YYYY-MM-DD`, amounts with exactly 2 decimals (negative for cancellations).
+- ICD-10-CM codes are stored **without the decimal point** (`E119`, `N1831`, `F32A`),
+  as in real CMS claims files. Add the dot in your staging layer if you want it.
+- `DGNS_PRCDR_ICD_IND = 0` (ICD-10) everywhere.
+- Sizes: monthly files ~3.4–4.4 KB (range 3–5 KB). The first month is the initial
+  load: CCLF8 ~18 KB, claims files ~9–10 KB. The generator tunes row counts to a byte
+  budget per file and prints the actual sizes at the end.
+- Column names and order follow the lists in the project brief, which are a subset of
+  the CCLF Information Packet layouts. They were not checked against the packet
+  itself, so expect differences from production CCLF files.
 
-| Resource | Details |
+## Incremental load semantics
+
+Each monthly file holds only what CMS "loaded" that month.
+
+### CCLF8 (beneficiaries)
+
+- **Initial month**: the starting population (118 beneficiaries), all `NEW`.
+- **Later months**: newly attributed beneficiaries and switchers arriving from MA
+  (`NEW`), plus changed records for existing ones (`UPDATE`): address/ZIP change, dual
+  status change, Part B enrollment, death date added, FFS coverage ended or resumed.
+- Every `UPDATE` is a **full row with current values**, never a partial update. The
+  latest row per `BENE_MBI_ID` is the current state. `BENE_AGE` is computed as of the
+  delivery month, so it moves forward over time even with no other change.
+- A beneficiary appears at most once per monthly file.
+- `RECORD_CHANGE_TYPE` (`NEW` / `UPDATE`) is a **synthetic helper column, not a real
+  CCLF field**. Real CCLF8 sends no change flag; you have to diff against what you
+  already hold. Try ignoring the column and deriving it yourself.
+- MBIs follow the CMS MBI format and never change (no CCLF9 crosswalk is generated).
+- Deaths: `BENE_DEATH_DT` and `BENE_RNG_END_DT` are filled in, in the death month or
+  the month after. Dead beneficiaries get no further CCLF8 updates. Late-arriving
+  claims with service dates before the death can still show up later.
+- **Leaving FFS for MA**: in the month the MA coverage starts, the beneficiary gets an
+  `UPDATE` with `BENE_RNG_END_DT` = the last day of FFS coverage (`FFS_END` in
+  `member_changes.csv`). No FFS claims are dated after it. A beneficiary returning from
+  MA gets an `UPDATE` with a new `BENE_RNG_BGN_DT` and a blank `BENE_RNG_END_DT`
+  (`FFS_RETURN`). Someone who starts in MA and moves to FFS arrives as `NEW`.
+
+### Claims (CCLF1 / CCLF4 / CCLF5)
+
+- `CLM_IDR_LD_DT` (claim load date) always falls inside the delivery month. It
+  decides which file a claim version lands in.
+- About 90% of claims have service dates 0–3 months before the load month. About 10%
+  are **late-arriving**, with service dates 4–12 months earlier (realized: 10.2% for seed 42).
+- Every claim falls inside an FFS span (`BENE_RNG_BGN_DT`..`BENE_RNG_END_DT`), and
+  none is after death or before Part B enrollment (Part B).
+- Utilization is concentrated: the top 20% of beneficiaries generate about 80% of claims.
+
+## Cancellations and adjustments
+
+`CLM_ADJSMT_TYPE_CD`: `0` = original, `1` = cancellation, `2` = adjustment.
+
+- About 5% of claim versions are cancellations and about 5% are adjustments. Each one
+  targets an original delivered 1–6 months earlier, and each original is actioned at
+  most once.
+- The action reuses the original's identifying data (beneficiary, provider, service
+  dates, diagnoses, lines) and gets a **new `CUR_CLM_UNIQ_ID`** and a new load date.
+- **Linkage**: the action carries the **same `CLM_CNTL_NUM`** as its original. On
+  CCLF1 it also sets `CLM_ORG_CNTL_NUM` to the original's control number (blank on
+  originals). Treat `(file, CLM_CNTL_NUM)` as the claim family key.
+- **Cancellation**: amounts are negated (`CLM_PMT_AMT`,
+  `CLM_MDCR_INSTNL_TOT_CHRG_AMT`, and each Part B line's paid and allowed amounts), so
+  original + cancel nets to zero. Part A `CLM_BILL_FREQ_CD = 8` (void).
+- **Adjustment**: a full **replacement** with a changed payment amount, not a delta.
+  Part A: `CLM_PMT_AMT` changes. Part B: one line is repriced. Part A
+  `CLM_BILL_FREQ_CD = 7` (replacement).
+- A naive `SUM()` over all rows is therefore **wrong**: it double-counts adjusted
+  claims. The correct rule:
+
+  > Group versions by `(part, CLM_CNTL_NUM)`. Cancelled family → 0. Adjusted family
+  > → the adjustment's amount. Otherwise → the original's amount.
+  > Part B amount = sum of `CLM_LINE_CVRD_PD_AMT` over the claim's lines.
+
+## Answer key (`answer_key/`)
+
+These files are written from the generator's in-memory simulation, not by re-reading
+the CSVs. `validate_cclf.py` then re-derives them from the CSVs and checks that the
+two agree.
+
+| File | What your ETL should reproduce |
 |---|---|
-| Lambda `claims-etl-ingest` | Python 3.13, 1024 MB, 300 s timeout, 2 GB `/tmp` |
-| pyarrow | AWS SDK for pandas public layer (`AWSSDKPandas-Python313:17`, pyarrow 24) |
-| Package | `build/lambda.zip`: our code, `config/`, PyYAML, requests (~1.6 MB, deterministic; shared with the notifier) |
-| IAM role | Least privilege: read/delete `cms/desynpuf/*`, write `archive/*` and `quarantine/*` in landing, write `cms/desynpuf/*` and `_manifests/*` in raw, own log group only |
-| Trigger | S3 `ObjectCreated`, prefix `cms/desynpuf/`, suffix `.zip` (archive/quarantine moves can't re-trigger) |
-| Retries | An `error` outcome raises, so Lambda retries async invocations twice. `quarantined` is final and not retried |
-| Logs | `/aws/lambda/claims-etl-ingest`, JSON lines, 30-day retention |
-| Notifier | `claims-etl-notify` (`notifier.tf`): 256 MB, 300 s timeout, same package without the pandas layer; trigger `quarantine/*.error.json` |
+| `final_members.csv` | Latest state of every beneficiary (all CCLF8 columns except the helper, plus `FIRST_DELIVERY_MONTH`, `LAST_DELIVERY_MONTH`) |
+| `net_paid_by_service_month.csv` | Part A / Part B / total net paid by month of the original `CLM_FROM_DT`, after cancellations and adjustments |
+| `net_paid_by_load_month.csv` | Net change booked in each delivery month (originals, plus adjustment deltas, minus cancelled amounts). Sums to the same grand total |
+| `claim_actions.csv` | Every cancellation/adjustment with its original: IDs, load months, amounts, final amount |
+| `member_changes.csv` | Every CCLF8 row's reason (`NEW`, `ADDRESS`, `DUAL`, `PARTB`, `DEATH`, `FFS_END`, `FFS_RETURN`) and a short detail, useful for SCD2 testing |
+| `crossover_members.csv` | Every FFS ↔ MA switch (shared with the Humana generator) |
+| `summary.json` | Counts and grand totals |
 
-Deploy or update:
+## Validator (`validate_cclf.py`)
 
-```bash
-.venv/Scripts/python scripts/build_lambda.py        # rebuild the package
-cd infra/terraform
-terraform init                                       # first time only
-terraform plan -out=tfplan && terraform apply tfplan
-```
+It reads only the CSVs and the answer key, prints PASS/FAIL per check, and exits 1
+on any failure. It ignores `output/humana/`. Checks:
 
-Terraform state is local (gitignored). Move it to an S3 backend before CI or anyone else runs it.
+- All 144 files present; headers match; date and amount formats
+- File sizes within range (initial load and monthly)
+- Valid MBIs; `NEW` exactly once and before any `UPDATE`; MBI→HICN stable
+- Every claim MBI exists in a CCLF8 delivered the same month or earlier
+- Every CCLF4 claim exists in the same month's CCLF1; 1–6 dx rows; sequence 0 =
+  `PRNCPL_DGNS_CD`
+- `CUR_CLM_UNIQ_ID` unique across all files and months
+- `CLM_IDR_LD_DT` inside the delivery month; every NPI passes the Luhn check
+- Cancellations/adjustments link to exactly one earlier original with the same
+  identifying data; cancel = −original; adjustment ≠ original; shares 3–7%
+- Claims inside an FFS span; none after death
+- Late-arriving share 7–13%; utilization concentration
+- Answer key files match a recomputation from the CSVs
 
-## Tests
+---
 
-```bash
-.venv/Scripts/python -m pytest      # 146 tests; no AWS or GitHub access (moto + responses)
-.venv/Scripts/python -m ruff check src tests
-```
+# Humana Medicare Advantage
 
-Fixture zips are built at test time, including deliberately broken ones: bad name, corrupt or
-truncated zip, CRC mismatch, path traversal, nested archive, zip bomb, wrong/reordered header,
-ragged row, header only, empty key, non-UTF-8 bytes.
+> **The field names are invented.** Humana's real extract layouts are proprietary.
+> These columns are modeled on typical MA payer eligibility/claims extracts and on the
+> APCD Common Data Layout (CDL), so they look like what a payer sends. They are not a
+> Humana specification. Contract IDs (`H9101`, `H9102`), plan names and member IDs
+> are fake.
 
-## Loaded so far (beneficiary summary, Sample 1)
+## Format
 
-Loaded by the Lambda into a freshly emptied landing bucket on 2026-11-04. Every file
-reconciled (CSV data rows = Parquet rows) before upload. Raw files have 38 columns:
-32 source columns + 6 metadata columns. The CSVs are ASCII with CRLF line endings.
+- `output/humana/YYYY-MM/HUM_{ELIG,MEDCLM}_YYYYMM.csv`: 36 months × 2 files = 72 files.
+- Same CSV conventions as CCLF: header row, comma-delimited, LF, empty = missing,
+  dates `YYYY-MM-DD`, amounts with 2 decimals, ICD-10 codes without the dot,
+  `ICD_VERSION = 0`.
+- Sizes: monthly files ~4.2–5.4 KB (range 4–6 KB). Initial load: HUM_ELIG ~17 KB
+  (range 15–25 KB), HUM_MEDCLM ~11 KB (range 10–15 KB). Sizes print at the end.
+- Products: `HMO` (H9101-001), `D-SNP` (H9101-003, dual-eligible members only) and
+  `PPO` (H9102-002). Duals are mostly in the D-SNP.
 
-| Year | Zip SHA-256 | CSV rows = Parquet rows | Raw file |
-|---|---|---|---|
-| 2008 | `2b0c9cbf…3d70b18b` | 116,352 | `year=2008/sample=1/part-0.parquet`, 4.2 MB |
-| 2009 | `dff18533…880bb379` | 114,538 | `year=2009/sample=1/part-0.parquet`, 4.2 MB |
-| 2010 | `b28b8ac7…7dc1fdff` | 112,754 | `year=2010/sample=1/part-0.parquet`, 4.0 MB |
+## HUM_ELIG (eligibility)
 
-The same run quarantined two deliberately broken practice files (at `csv_header` and
-`expected_member`). Each opened a GitHub issue automatically.
+- `MEMBER_ID` is `H` + 9 digits, 1:1 with `MBI` (the same MBI as in CCLF for
+  switchers).
+- **Initial month**: the starting roster (88 members), all `NEW`.
+- **Later months**: new enrollees and switchers from FFS (`NEW`), changed members
+  (`UPDATE`) and terminations (`TERM`). Each row is a **full row with current
+  values**; at most one row per member per month.
+- Change types (reason in `answer_key/humana/member_changes.csv`): PCP change
+  (`PCP_NPI`, `PCP_TIN`, `PCP_ATTRIBUTION_START_DT`), address change, dual/LIS change
+  (D-SNP members stay dual), disenrollment, death.
+- **Disenrollment** (`TERM`): delivered in the month after coverage ends, with
+  `ENROLLMENT_END_DT` = the last covered day (to FFS, or to another MA plan).
+- **Death** (`TERM`): `DEATH_DT` filled in, `ENROLLMENT_END_DT` = end of the death
+  month, delivered in the death month or the month after. Nothing is delivered for a
+  member after a `TERM`.
+- `RECORD_CHANGE_TYPE` is a synthetic helper column, as in CCLF8.
 
-## Project layout
+## HUM_MEDCLM (medical claims)
 
-```
-config/                     ingestion.yml, notifications.yml, file_types/*.yml
-src/claims_etl/ingestion/
-  pipeline.py               process_zip orchestration
-  validation.py             runs checks in order
-  checks.py                 one function per check
-  zip_inspect.py            safe member handling, one-pass CSV profile
-  parquet_writer.py         CSV → Parquet (string columns + metadata)
-  s3_store.py               the only boto3 code (download, upload, move = copy→verify→delete)
-  manifest.py               idempotency records
-  log.py / utils.py          JSON-lines logging, checksum and time helpers (shared)
-  cli.py / lambda_handler.py
-src/claims_etl/s3_events.py S3 event parsing shared by both handlers (no pyarrow)
-src/claims_etl/notifications/
-  notifier.py               notify_quarantine: create issue or comment, record result
-  content.py                title/body/comment + sanitizing (no tracker dependency)
-  github_client.py          GitHub REST: list/create/comment/labels, retries
-  ticket_record.py          _tickets/<sha256>.json
-  report.py                 typed, validated view of an .error.json
-  config.py                 notifications.yml (labels, title templates, next steps)
-  settings.py               get_setting(): env locally, SSM in Lambda
-  cli.py / lambda_handler.py
-scripts/build_lambda.py     Lambda deployment package (shared by both functions)
-infra/terraform/            main.tf (ingestion), notifier.tf, S3 triggers, IAM, logs, SSM
-tests/
-```
+- **One row per claim line**; header fields repeat on every line. The key is
+  `(CLAIM_ID, CLAIM_LINE_NUM, CLAIM_FREQ_CD)`.
+- Delivered by **`PROCESSED_DT` month**; `RECEIVED_DT` precedes it and the service
+  dates precede both. About 10% of originals are late-arriving (service 4–12 months
+  before processing).
+- `CLAIM_FORM_TYPE` `I` (UB-04: inpatient `BILL_TYPE 11x` with DRG, outpatient/ER
+  `13x`, SNF `21x`, with revenue codes and `FACILITY_CCN`) or `P` (CMS-1500:
+  `PLACE_OF_SERVICE`, `RENDERING_NPI`, `PROVIDER_SPECIALTY`). Fields that do not apply
+  to the form are blank.
+- Up to 12 diagnosis codes (`DX_CODE_1..12`); `DX_CODE_1` is the principal.
+- Amounts: `BILLED_AMT > ALLOWED_AMT >= PAID_AMT`, and `COPAY + COINSURANCE +
+  DEDUCTIBLE = ALLOWED − PAID` (except capitated lines, below). Cost sharing follows
+  the product: copays per visit type, per-day inpatient copay for days 1–5, SNF days
+  21+, PPO radiology coinsurance and deductibles; D-SNP members pay $0.
+- Claims fall only inside the member's MA enrollment and never after death.
+- Out-of-network claims (`IN_NETWORK_FLAG = N`): some ER visits at a non-contracted
+  hospital, and urgent-care visits (POS 20).
+
+## Reversals, replacements, denials and capitation
+
+`CLAIM_FREQ_CD`: `1` = original, `7` = replacement, `8` = void/reversal.
+`CLAIM_STATUS`: `P` = paid, `D` = denied, `R` = reversed.
+
+- **Replaced (~5% of originals)**: in one later month, a **reversal** (same
+  `CLAIM_ID`, status `R`, freq `8`, every amount negated, `ORIG_CLAIM_ID` = the
+  original) plus a **replacement** (new `CLAIM_ID`, freq `7`, `ORIG_CLAIM_ID` = the
+  original, repriced so `PAID_AMT` changes).
+- **Voided (~3%)**: the reversal only.
+- **Denied (~3%)**: status `D`, `ALLOWED_AMT = PAID_AMT = 0`, billed kept.
+- Institutional `BILL_TYPE` ends in the frequency code (`111`, `117`, `118`).
+- Unlike CCLF, the reversal makes a **plain `SUM(PAID_AMT)` over every row correct**:
+  original + reversal nets to zero and the replacement adds the new amount. To report
+  by claim, group by family: the original `CLAIM_ID` = `ORIG_CLAIM_ID` on reversals
+  and replacements.
+- **Capitation**: about 30% of professional claims rendered by the member's own PCP
+  are capitated encounters (`CAPITATED_FLAG = Y`, `PAID_AMT = 0`, `ALLOWED_AMT`
+  populated, no `PAID_DT`). This applies only to HMO and D-SNP members whose PCP
+  group holds a capitated arrangement. Capitated and denied claims are never reversed.
+
+## Field mapping to CCLF
+
+| Concept | CCLF | Humana |
+|---|---|---|
+| Medicare beneficiary ID | `BENE_MBI_ID` | `MBI` (plus payer `MEMBER_ID`) |
+| Name, DOB | `BENE_1ST_NAME`, `BENE_MIDL_NAME`, `BENE_LAST_NAME`, `BENE_DOB` | `FIRST_NAME`, `MIDDLE_INITIAL`, `LAST_NAME`, `DOB` |
+| Sex | `BENE_SEX_CD` (`1`/`2`) | `GENDER` (`M`/`F`) |
+| Address | `BENE_LINE_1_ADR`, `GEO_ZIP_PLC_NAME`, `GEO_USPS_STATE_CD`, `GEO_ZIP5_CD` | `ADDRESS_LINE_1`, `CITY`, `STATE`, `ZIP` |
+| County | `BENE_FIPS_STATE_CD` + `BENE_FIPS_CNTY_CD` | `COUNTY_FIPS` (5 digits) |
+| Coverage span | `BENE_RNG_BGN_DT`, `BENE_RNG_END_DT` | `ENROLLMENT_START_DT`, `ENROLLMENT_END_DT` |
+| Dual status | `BENE_DUAL_STUS_CD` (code, `NA` = not dual) | `DUAL_FLAG` (`Y`/`N`), `LIS_FLAG` |
+| Death | `BENE_DEATH_DT` | `DEATH_DT` (+ `TERM` row) |
+| Change flag (synthetic) | `RECORD_CHANGE_TYPE` `NEW`/`UPDATE` | `RECORD_CHANGE_TYPE` `NEW`/`UPDATE`/`TERM` |
+| Claim ID | `CUR_CLM_UNIQ_ID` (new per version) | `CLAIM_ID` (reversal reuses it; replacement is new) |
+| Claim family key | `CLM_CNTL_NUM` (+ `CLM_ORG_CNTL_NUM` on CCLF1) | original `CLAIM_ID` = `ORIG_CLAIM_ID` |
+| Version type | `CLM_ADJSMT_TYPE_CD` `0`/`1`/`2` | `CLAIM_FREQ_CD` `1`/`8`/`7` + `CLAIM_STATUS` |
+| Delivery date | `CLM_IDR_LD_DT` | `PROCESSED_DT` |
+| Institutional vs professional | separate files (CCLF1/4 vs CCLF5) | `CLAIM_FORM_TYPE` `I`/`P` in one file |
+| Bill type | `CLM_BILL_FAC_TYPE_CD` + `CLM_BILL_CLSFCTN_CD` + `CLM_BILL_FREQ_CD` | `BILL_TYPE` (3 digits) |
+| Service dates | `CLM_FROM_DT`, `CLM_THRU_DT` | `SERVICE_FROM_DT`, `SERVICE_TO_DT` (+ line dates) |
+| Facility | `PRVDR_OSCAR_NUM`, `FAC_PRVDR_NPI_NUM` | `FACILITY_CCN`, `BILLING_NPI` |
+| Rendering / attending | `RNDRG_PRVDR_NPI_NUM` (CCLF5), `ATNDG_PRVDR_NPI_NUM` (CCLF1) | `RENDERING_NPI`, `ATTENDING_NPI` |
+| Provider TIN | `CLM_RNDRG_PRVDR_TAX_NUM` (CCLF5) | `BILLING_TIN` |
+| DRG | `DGNS_DRG_CD` | `DRG_CD` |
+| Diagnoses | CCLF4 rows (`CLM_VAL_SQNC_NUM`), `PRNCPL_DGNS_CD` | `DX_CODE_1..12` on every line |
+| Procedure | `CLM_LINE_HCPCS_CD` (CCLF5) | `PROCEDURE_CD`, `REVENUE_CD` |
+| Paid amount | `CLM_PMT_AMT` (CCLF1), `CLM_LINE_CVRD_PD_AMT` (CCLF5) | `PAID_AMT` (per line) |
+| Allowed / charges | `CLM_LINE_ALOWD_CHRG_AMT` (CCLF5), `CLM_MDCR_INSTNL_TOT_CHRG_AMT` | `ALLOWED_AMT`, `BILLED_AMT` |
+| Member cost share | (not in these layouts) | `COPAY_AMT`, `COINSURANCE_AMT`, `DEDUCTIBLE_AMT` |
+| Plan / network / capitation | (FFS: n/a) | `CONTRACT_ID`, `PBP_ID`, `IN_NETWORK_FLAG`, `CAPITATED_FLAG` |
+| Attributed PCP | (ACO attribution, not in CCLF8) | `PCP_NPI`, `PCP_TIN`, `PCP_ATTRIBUTION_START_DT` |
+
+## Answer key (`answer_key/humana/`)
+
+| File | What your ETL should reproduce |
+|---|---|
+| `final_members.csv` | Latest state of every member (all HUM_ELIG columns except the helper, plus `FIRST_DELIVERY_MONTH`, `LAST_DELIVERY_MONTH`) |
+| `net_paid_by_service_month.csv` | Institutional / professional / total net paid by the original's service month, after reversals and replacements |
+| `net_paid_by_processed_month.csv` | Paid booked in each delivery month (sum of every row's `PAID_AMT`) |
+| `capitated_encounters_by_month.csv` | Capitated claims, lines and allowed amount by service month |
+| `claim_actions.csv` | Every void and replacement with its original, amounts and final paid |
+| `member_changes.csv` | Every HUM_ELIG row's reason (`NEW`, `PCP`, `ADDRESS`, `DUAL_LIS`, `DISENROLL`, `DEATH`) and a detail |
+| `summary.json` | Counts and grand totals |
+
+## Validators
+
+`validate_humana.py` (output/humana vs answer_key/humana) checks: files, headers and
+formats; sizes; MEMBER_ID/MBI format and 1:1; `NEW` first and nothing after `TERM`;
+plan/contract consistency and D-SNP members being dual; claims only for delivered
+members, inside an enrollment span and not after death; a unique claim-line key;
+reversal/replacement linkage (negation, same month, paid changed) and the action
+shares; form-type field rules; amount and cost-share arithmetic; date ordering; the
+late share; capitation only on PCP-rendered claims at ~30%; out-of-network presence;
+and every answer key file. It recomputes net paid as a plain `SUM(PAID_AMT)`, a
+different method from the generator's claim-family logic.
+
+`validate_crosspayer.py` (CCLF output vs Humana output) checks: 15–20 switchers with
+valid directions and dates; that the only MBIs in both feeds are the listed switchers;
+no overlapping FFS/MA coverage, with the observed switches matching the crossover
+list; no CCLF claims during MA coverage and no Humana claims during FFS coverage; and
+the same name/DOB/sex everywhere, plus the same address and dual status in each
+switch month.
+
+---
+
+## Reference data used
+
+- Providers: 6 facilities (2 shared hospitals, SNF, HHA, hospice, plus 1
+  out-of-network MA hospital; Ohio CCNs) and 13 professionals across 6 TINs, all
+  Luhn-valid and fake. CCLF uses the 14 FFS NPIs.
+- Claim types (CCLF1): outpatient 40, inpatient 60 (with MS-DRG and length of stay),
+  SNF 20, swing bed 30, home health 10, hospice 50. CCLF5 uses claim type 71.
+- HCPCS: 99213, 99214, 99203, 99204, G0439, 36415, 80053, 85025, 83036, 93000,
+  71046, 20610, at approximate national allowed amounts. CCLF paid is 80% of allowed;
+  labs and the annual wellness visit are paid at 100% (no coinsurance). Humana adds
+  ER levels 99283–99285 and G0463 clinic visits on the facility side.
+- Population: ~10% under 65 (disabled, `BENE_ORGNL_ENTLMT_RSN_CD=1`, some ESRD=2),
+  ~15% dual-eligible, a few ESRD, ~3% deaths.
+
+## Tuning
+
+Population, switcher and provider parameters live at the top of `member_registry.py`.
+Byte targets and claim shares live at the top of `generate_cclf.py` and
+`generate_humana.py`. After any change, run all three validators across several seeds.
+The tests run seed 7; a 30-seed sweep of all three validators passed when this was
+written.

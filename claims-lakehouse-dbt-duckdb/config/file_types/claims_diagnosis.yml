@@ -1,0 +1,29 @@
+# CCLF4 Part A diagnosis codes: one CSV per monthly delivery (1-6 rows per CCLF1 claim version).
+# expected_columns copied verbatim from the header of
+# CCLF4_202301.csv (inspected 2026-11-04; identical in all 36 months).
+landing_prefix: cms/cclf/
+file_type: claims_diagnosis
+
+# Named groups are available to raw_key_template. Raw is partitioned by
+# delivery month (from the file name), never by claim dates.
+file_name_regex: '^CCLF4_(?P<year>\d{4})(?P<month>0[1-9]|1[0-2])\.csv$'
+raw_key_template: 'cms/cclf/claims_diagnosis/delivery_month={year}-{month}/part-0.parquet'
+
+key_columns:
+  - CUR_CLM_UNIQ_ID
+  - BENE_MBI_ID
+  - CLM_VAL_SQNC_NUM
+
+expected_columns:
+  - CUR_CLM_UNIQ_ID
+  - BENE_MBI_ID
+  - BENE_HIC_NUM
+  - CLM_TYPE_CD
+  - CLM_PROD_TYPE_CD
+  - CLM_VAL_SQNC_NUM
+  - CLM_DGNS_CD
+  - PRVDR_OSCAR_NUM
+  - CLM_FROM_DT
+  - CLM_THRU_DT
+  - CLM_POA_IND
+  - DGNS_PRCDR_ICD_IND
