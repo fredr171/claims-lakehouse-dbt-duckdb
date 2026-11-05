@@ -18,26 +18,32 @@ from tests.conftest import (
     HUM_COLUMNS,
     HUM_FILE_NAME,
     HUM_LANDING_KEY,
-    HUM_RAW_KEY,
+    HUM_RAW_PARTITION,
     HUM_ROWS,
     LANDING_BUCKET,
     LANDING_KEY,
     RAW_BUCKET,
-    RAW_KEY,
     VALID_ROWS,
     csv_bytes,
+    delivery_key,
+    raw_key,
     write_csv,
 )
 
-ARCHIVE_KEY = f"archive/{LANDING_KEY}"
-QUARANTINE_KEY = f"quarantine/{LANDING_KEY}"
+
+def archive_key(path: Path, key: str = LANDING_KEY) -> str:
+    return delivery_key("archive/", key, sha256_file(path))
+
+
+def quarantine_key(path: Path, key: str = LANDING_KEY) -> str:
+    return delivery_key("quarantine/", key, sha256_file(path))
 
 
 def _land(s3: S3Store, path: Path, key: str = LANDING_KEY) -> None:
     s3.upload(path, LANDING_BUCKET, key)
 
 
-def _read_raw(s3: S3Store, key: str = RAW_KEY):
+def _read_raw(s3: S3Store, key: str):
     body = s3._client.get_object(Bucket=RAW_BUCKET, Key=key)["Body"].read()
     return pq.read_table(io.BytesIO(body))
 
@@ -48,10 +54,10 @@ def test_success_publishes_parquet_manifest_and_archives(s3, config, valid_csv) 
 
     assert record.outcome is Outcome.SUCCESS
     assert record.csv_row_count == record.parquet_row_count == 3
-    assert record.output_uri == f"s3://{RAW_BUCKET}/{RAW_KEY}"
+    assert record.output_uri == f"s3://{RAW_BUCKET}/{raw_key(record.checksum)}"
     assert record.name_fields == {"year": "2023", "month": "01"}
 
-    table = _read_raw(s3)
+    table = _read_raw(s3, raw_key(record.checksum))
     assert table.num_rows == 3
     assert set(table.column("_batch_id").to_pylist()) == {"batch-1"}
     assert set(table.column("_source_file").to_pylist()) == {FILE_NAME}
@@ -66,7 +72,25 @@ def test_success_publishes_parquet_manifest_and_archives(s3, config, valid_csv) 
     assert manifest["checks"][-1]["name"] == "row_count_reconciliation"
 
     assert not s3.exists(LANDING_BUCKET, LANDING_KEY)
-    assert s3.exists(LANDING_BUCKET, ARCHIVE_KEY)
+    assert s3.exists(LANDING_BUCKET, archive_key(valid_csv))
+
+
+def test_corrected_resend_lands_next_to_the_original(s3, config, valid_csv, tmp_path) -> None:
+    """Immutable bronze: a re-send of the same file name never replaces the first delivery."""
+    _land(s3, valid_csv)
+    first = process_file(LANDING_KEY, config=config, store=s3)
+    corrected = write_csv(tmp_path / "corrected.csv", csv_bytes(VALID_ROWS[:2]))
+    _land(s3, corrected)
+    second = process_file(LANDING_KEY, config=config, store=s3)
+
+    assert first.outcome is second.outcome is Outcome.SUCCESS
+    assert first.checksum != second.checksum and first.output_uri != second.output_uri
+    assert _read_raw(s3, raw_key(first.checksum)).num_rows == 3  # the original survives
+    assert _read_raw(s3, raw_key(second.checksum)).num_rows == 2
+    assert s3.exists(LANDING_BUCKET, archive_key(valid_csv))  # both deliveries archived
+    assert s3.exists(LANDING_BUCKET, archive_key(corrected))
+    for record in (first, second):
+        assert s3.get_json(RAW_BUCKET, f"_manifests/{record.checksum}.json")["outcome"] == "success"
 
 
 def test_next_month_lands_in_its_own_partition(s3, config, valid_csv, tmp_path) -> None:
@@ -78,9 +102,9 @@ def test_next_month_lands_in_its_own_partition(s3, config, valid_csv, tmp_path) 
     feb_record = process_file(feb_key, config=config, store=s3)
 
     assert jan_record.outcome is feb_record.outcome is Outcome.SUCCESS
-    feb_raw = "cms/cclf/claims_header/delivery_month=2023-02/part-0.parquet"
+    feb_raw = raw_key(feb_record.checksum, "cms/cclf/claims_header/delivery_month=2023-02")
     assert feb_record.output_uri == f"s3://{RAW_BUCKET}/{feb_raw}"
-    assert _read_raw(s3).num_rows == 3  # January untouched
+    assert _read_raw(s3, raw_key(jan_record.checksum)).num_rows == 3  # January untouched
     assert _read_raw(s3, feb_raw).num_rows == 1
 
 
@@ -91,11 +115,12 @@ def test_humana_feed_lands_in_its_own_raw_prefix(s3, config, tmp_path) -> None:
 
     assert record.outcome is Outcome.SUCCESS
     assert record.file_type == "member_eligibility"
-    assert record.output_uri == f"s3://{RAW_BUCKET}/{HUM_RAW_KEY}"
-    table = _read_raw(s3, HUM_RAW_KEY)
+    hum_raw = raw_key(record.checksum, HUM_RAW_PARTITION)
+    assert record.output_uri == f"s3://{RAW_BUCKET}/{hum_raw}"
+    table = _read_raw(s3, hum_raw)
     assert table.column("COUNTY_FIPS").to_pylist() == ["39099", "05001"]  # leading zero kept
     assert set(table.column("_source_file").to_pylist()) == {HUM_FILE_NAME}
-    assert s3.exists(LANDING_BUCKET, f"archive/{HUM_LANDING_KEY}")
+    assert s3.exists(LANDING_BUCKET, archive_key(hum, HUM_LANDING_KEY))
     assert not s3.exists(LANDING_BUCKET, HUM_LANDING_KEY)
 
 
@@ -106,7 +131,7 @@ def test_cclf_file_under_the_humana_prefix_is_quarantined(s3, config, valid_csv)
 
     assert record.outcome is Outcome.QUARANTINED
     assert record.failed_check == "known_file_type"
-    assert s3.exists(LANDING_BUCKET, f"quarantine/{wrong_feed_key}")
+    assert s3.exists(LANDING_BUCKET, quarantine_key(valid_csv, wrong_feed_key))
 
 
 def test_same_checksum_is_skipped_and_archived(s3, config, valid_csv) -> None:
@@ -132,11 +157,11 @@ def test_invalid_file_is_quarantined_with_error_json(s3, config, tmp_path) -> No
     assert record.outcome is Outcome.QUARANTINED
     assert record.failed_check == "csv_header"
     assert not s3.exists(LANDING_BUCKET, LANDING_KEY)
-    assert s3.exists(LANDING_BUCKET, QUARANTINE_KEY)
-    error = s3.get_json(LANDING_BUCKET, f"{QUARANTINE_KEY}.error.json")
+    assert s3.exists(LANDING_BUCKET, quarantine_key(bad))
+    error = s3.get_json(LANDING_BUCKET, f"{quarantine_key(bad)}.error.json")
     assert error["failed_check"] == "csv_header"
     assert s3.get_json(RAW_BUCKET, f"_manifests/{record.checksum}.json")["outcome"] == "quarantined"
-    assert not s3.exists(RAW_BUCKET, RAW_KEY)
+    assert not list(s3.list_keys(RAW_BUCKET, "cms/"))
 
 
 def test_quarantined_file_can_be_fixed_and_redelivered(s3, config, tmp_path, valid_csv) -> None:
@@ -156,8 +181,8 @@ def test_reconciliation_mismatch_quarantines_without_upload(
 
     assert record.outcome is Outcome.QUARANTINED
     assert record.failed_check == "row_count_reconciliation"
-    assert not s3.exists(RAW_BUCKET, RAW_KEY)
-    assert s3.exists(LANDING_BUCKET, QUARANTINE_KEY)
+    assert not list(s3.list_keys(RAW_BUCKET, "cms/"))
+    assert s3.exists(LANDING_BUCKET, quarantine_key(valid_csv))
 
 
 def test_infrastructure_failure_is_error_and_leaves_nothing_moved(s3, config) -> None:
@@ -165,7 +190,7 @@ def test_infrastructure_failure_is_error_and_leaves_nothing_moved(s3, config) ->
     record = process_file(LANDING_KEY, config=config, store=s3)
     assert record.outcome is Outcome.ERROR
     assert "ClientError" in (record.failure_details or "")
-    assert not s3.exists(LANDING_BUCKET, QUARANTINE_KEY)
+    assert not list(s3.list_keys(LANDING_BUCKET, "quarantine/"))
 
 
 def test_rejects_keys_outside_landing_prefix(s3, config) -> None:
@@ -175,9 +200,11 @@ def test_rejects_keys_outside_landing_prefix(s3, config) -> None:
 
 def test_move_copies_verifies_and_deletes(s3, valid_csv) -> None:
     _land(s3, valid_csv)
-    s3.move(LANDING_BUCKET, LANDING_KEY, ARCHIVE_KEY)
+    s3.move(LANDING_BUCKET, LANDING_KEY, archive_key(valid_csv))
     assert not s3.exists(LANDING_BUCKET, LANDING_KEY)
-    assert s3.head(LANDING_BUCKET, ARCHIVE_KEY)["ContentLength"] == valid_csv.stat().st_size
+    assert s3.head(LANDING_BUCKET, archive_key(valid_csv))["ContentLength"] == (
+        valid_csv.stat().st_size
+    )
 
 
 def test_move_of_missing_object_raises(s3) -> None:

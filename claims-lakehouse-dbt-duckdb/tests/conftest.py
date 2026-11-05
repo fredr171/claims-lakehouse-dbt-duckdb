@@ -27,12 +27,12 @@ RAW_BUCKET = "test-raw"
 COLUMNS = ["CUR_CLM_UNIQ_ID", "BENE_MBI_ID", "PRVDR_FAC_FIPS_ST_CD"]
 FILE_NAME = "CCLF1_202301.csv"
 LANDING_KEY = f"cms/cclf/claims_header/{FILE_NAME}"
-RAW_KEY = "cms/cclf/claims_header/delivery_month=2023-01/part-0.parquet"
+RAW_PARTITION = "cms/cclf/claims_header/delivery_month=2023-01"  # + /checksum=<sha>/part-0.parquet
 # Second feed (Humana MA).
 HUM_COLUMNS = ["MEMBER_ID", "MBI", "COUNTY_FIPS"]
 HUM_FILE_NAME = "HUM_ELIG_202301.csv"
 HUM_LANDING_KEY = f"humana/ma/member_eligibility/{HUM_FILE_NAME}"
-HUM_RAW_KEY = "humana/ma/member_eligibility/delivery_month=2023-01/part-0.parquet"
+HUM_RAW_PARTITION = "humana/ma/member_eligibility/delivery_month=2023-01"
 HUM_ROWS = [["H100000001", "6AA3QX1NP94", "39099"], ["H100000002", "9GD7PX4RK74", "05001"]]
 # Synthetic values in the generator's formats (not real identifiers).
 VALID_ROWS = [
@@ -87,6 +87,17 @@ def write_test_config(config_dir: Path) -> Path:
         real = Path(__file__).resolve().parents[1] / "config" / name
         (config_dir / name).write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
     return config_dir
+
+
+def raw_key(checksum: str, partition: str = RAW_PARTITION) -> str:
+    """Raw key of one delivered file: one immutable key per delivery (immutable bronze)."""
+    return f"{partition}/checksum={checksum}/part-0.parquet"
+
+
+def delivery_key(prefix: str, landing_key: str, checksum: str) -> str:
+    """archive/ or quarantine/ key of one delivered file: <prefix><folder>/checksum=<sha>/<name>."""
+    folder, _, name = landing_key.rpartition("/")
+    return f"{prefix}{folder}/checksum={checksum}/{name}"
 
 
 @pytest.fixture

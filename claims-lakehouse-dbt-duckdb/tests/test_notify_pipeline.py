@@ -31,7 +31,10 @@ TOKEN = "github_pat_TEST_SECRET_DO_NOT_LOG_456"
 REPO = "owner/repo"
 ISSUES = f"{API_ROOT}/repos/{REPO}/issues"
 LABELS = f"{API_ROOT}/repos/{REPO}/labels"
-ERROR_KEY = f"quarantine/{LANDING_KEY}.error.json"
+# A well-formed report key the handler must ignore when it comes from another bucket.
+OTHER_ERROR_KEY = (
+    f"quarantine/cms/cclf/claims_header/checksum={'0' * 64}/CCLF1_202301.csv.error.json"
+)
 
 
 @pytest.fixture
@@ -60,6 +63,13 @@ def _quarantine(s3, config, tmp_path: Path, rows=None, header=COLUMNS) -> dict:
     return record.to_dict()
 
 
+def _error_key(report: dict) -> str:
+    """The .error.json ingestion wrote next to the quarantined file (checksum-keyed)."""
+    quarantined = report["landing_destination_uri"].removeprefix(f"s3://{LANDING_BUCKET}/")
+    assert f"/checksum={report['checksum_sha256']}/" in quarantined
+    return f"{quarantined}.error.json"
+
+
 def _mock_create(api, number: int = 41) -> None:
     api.get(ISSUES, json=[])
     api.get(LABELS, json=[{"name": "quarantine"}])
@@ -79,7 +89,7 @@ def test_new_issue_created_with_title_body_labels(s3, config, ncfg, client, api,
     report = _quarantine(s3, config, tmp_path, rows=[VALID_ROWS[0], ["1000085822479", "", "05"]])
     _mock_create(api)
 
-    result = notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+    result = notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
 
     assert result.outcome is NotifyOutcome.CREATED
     assert (result.ticket_number, result.ticket_url) == (41, "https://gh/41")
@@ -103,7 +113,7 @@ def test_duplicate_checksum_adds_comment_not_issue(s3, config, ncfg, client, api
     api.get(page2, json=[{"number": 6, "html_url": "https://gh/6", "body": body}])
     api.post(f"{ISSUES}/6/comments", status=201, json={"html_url": "https://gh/6#c1"})
 
-    result = notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+    result = notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
 
     assert result.outcome is NotifyOutcome.COMMENTED
     assert (result.ticket_number, result.comment_url) == (6, "https://gh/6#c1")
@@ -120,7 +130,7 @@ def test_ticket_record_written_and_manifest_untouched(
     manifest_before = s3.get_json(RAW_BUCKET, manifest_key)
     _mock_create(api)
 
-    notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+    notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
 
     record = load_ticket_record(s3, ncfg, report["checksum_sha256"])
     assert record is not None
@@ -131,12 +141,12 @@ def test_ticket_record_written_and_manifest_untouched(
 
 
 def test_same_event_twice_makes_no_api_calls(s3, config, ncfg, client, api, tmp_path) -> None:
-    _quarantine(s3, config, tmp_path, rows=[])
+    report = _quarantine(s3, config, tmp_path, rows=[])
     _mock_create(api)
-    notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+    notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
     calls_after_first = len(api.calls)
 
-    again = notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+    again = notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
 
     assert again.outcome is NotifyOutcome.ALREADY_NOTIFIED
     assert again.ticket_url == "https://gh/41"
@@ -149,7 +159,7 @@ def test_requarantine_of_same_file_comments_on_its_issue(
     """Same bytes delivered twice -> 1 issue, then 1 comment (the live-test scenario)."""
     report = _quarantine(s3, config, tmp_path, rows=[])
     _mock_create(api)
-    notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+    notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
 
     # Re-deliver identical bytes: same checksum, new batch.
     csv_path = sorted(tmp_path.glob("bad_*.csv"))[0]
@@ -161,7 +171,7 @@ def test_requarantine_of_same_file_comments_on_its_issue(
     body = f"Checksum: `{report['checksum_sha256']}`"
     api.get(ISSUES, json=[{"number": 41, "html_url": "https://gh/41", "body": body}])
     api.post(f"{ISSUES}/41/comments", status=201, json={"html_url": "https://gh/41#c2"})
-    result = notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+    result = notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
 
     assert result.outcome is NotifyOutcome.COMMENTED and result.ticket_number == 41
     record = load_ticket_record(s3, ncfg, report["checksum_sha256"])
@@ -172,13 +182,13 @@ def test_headerless_file_issue_contains_no_row_values(
     s3, config, ncfg, client, api, tmp_path
 ) -> None:
     # No header row: the first data row is parsed as the header and reported as columns.
-    _quarantine(s3, config, tmp_path, rows=VALID_ROWS[1:], header=VALID_ROWS[0])
+    report = _quarantine(s3, config, tmp_path, rows=VALID_ROWS[1:], header=VALID_ROWS[0])
     _mock_create(api)
-    notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+    notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
 
     issue = _posted_issue(api)
     assert issue["title"].endswith(": csv_header")  # failed where we expect, not elsewhere
-    error_json = s3.get_json(LANDING_BUCKET, ERROR_KEY)
+    error_json = s3.get_json(LANDING_BUCKET, _error_key(report))
     assert VALID_ROWS[0][0] in error_json["failure_details"]  # the private report HAS the value
     body = issue["body"]
     # ...but the public issue does not. Distinctive values must appear nowhere; short
@@ -200,11 +210,11 @@ def test_github_outage_fails_cleanly_and_ingestion_is_unaffected(
         api.get(ISSUES, status=502)
 
     with pytest.raises(TicketingError):
-        notify_quarantine(ERROR_KEY, config=ncfg, store=s3, client=client)
+        notify_quarantine(_error_key(report), config=ncfg, store=s3, client=client)
 
     # Quarantine and manifest are exactly as ingestion left them; nothing recorded.
-    assert s3.exists(LANDING_BUCKET, f"quarantine/{LANDING_KEY}")
-    assert s3.exists(LANDING_BUCKET, ERROR_KEY)
+    assert s3.exists(LANDING_BUCKET, _error_key(report).removesuffix(".error.json"))
+    assert s3.exists(LANDING_BUCKET, _error_key(report))
     manifest = s3.get_json(RAW_BUCKET, f"_manifests/{report['checksum_sha256']}.json")
     assert manifest["outcome"] == "quarantined"
     assert load_ticket_record(s3, ncfg, report["checksum_sha256"]) is None
@@ -244,12 +254,15 @@ def test_cli_scan_notifies_only_unticketed(
 def test_cli_exits_nonzero_on_github_failure(
     s3, config, config_dir, gh_env, api, tmp_path, capsys
 ) -> None:
-    _quarantine(s3, config, tmp_path, rows=[])
+    report = _quarantine(s3, config, tmp_path, rows=[])
     for _ in range(4):
         api.get(ISSUES, status=503)
-    assert cli.main(["--error-key", ERROR_KEY, "--config-dir", str(config_dir)]) == cli.EXIT_FAILED
+    assert (
+        cli.main(["--error-key", _error_key(report), "--config-dir", str(config_dir)])
+        == cli.EXIT_FAILED
+    )
     out = capsys.readouterr()
-    assert json.loads(out.out)["failures"][0]["error_key"] == ERROR_KEY
+    assert json.loads(out.out)["failures"][0]["error_key"] == _error_key(report)
     assert TOKEN not in out.out + out.err
 
 
@@ -271,10 +284,10 @@ def test_lambda_handler_ignores_non_report_keys(config_dir, monkeypatch) -> None
             {
                 "s3": {
                     "bucket": {"name": LANDING_BUCKET},
-                    "object": {"key": f"quarantine/{LANDING_KEY}"},
+                    "object": {"key": OTHER_ERROR_KEY.removesuffix(".error.json")},
                 }
             },
-            {"s3": {"bucket": {"name": "other"}, "object": {"key": ERROR_KEY}}},
+            {"s3": {"bucket": {"name": "other"}, "object": {"key": OTHER_ERROR_KEY}}},
         ]
     }
     assert lambda_handler.handler(event, None) == {"results": []}

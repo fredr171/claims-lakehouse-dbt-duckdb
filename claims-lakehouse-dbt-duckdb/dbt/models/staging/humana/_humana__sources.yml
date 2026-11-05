@@ -2,15 +2,16 @@ sources:
   - name: humana
     description: >
       Raw (bronze) Humana Medicare Advantage deliveries written by the ingestion Lambda:
-      one Parquet file per file type per delivery month, every source column as VARCHAR
-      exactly as delivered, plus ingestion metadata columns. Partitioned by
-      delivery_month (from the file name). Field names are invented by the synthetic
+      one Parquet file per DELIVERED FILE, every source column as VARCHAR exactly as
+      delivered, plus ingestion metadata columns. Immutable: partitioned by delivery_month
+      (from the file name) and checksum (the file's SHA-256), so a corrected re-send sits
+      next to the original; stg_humana__deliveries decides which delivery is current. Field names are invented by the synthetic
       generator (Humana's real layouts are proprietary).
     config:
       # {name} is the table name below; humana_raw_root defaults to the S3 raw bucket
       # (dbt_project.yml) and tests point it at a local folder. Partition value stays text.
       external_location: >-
-        read_parquet('{{ var("humana_raw_root") }}/{name}/*/*.parquet',
+        read_parquet('{{ var("humana_raw_root") }}/{name}/*/*/*.parquet',
         hive_partitioning = true, hive_types_autocast = false)
       loaded_at_field: _ingested_at
       freshness:

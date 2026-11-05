@@ -14,6 +14,10 @@ with the delivery months being processed. Checks:
    the intermediate model, and is scoped: a later month's run does not re-raise it,
    an unscoped run does.
 4. Many broken amount lines in one month turn the amount warning into a STOP.
+6. Immutable bronze: an inconsistent deliveries index (a file under another file's
+   checksum folder, or two deliveries of one file tied for "current") is a STOP that
+   skips the whole feed's staging and intermediate models; so is raw losing a delivery
+   that intermediate was built from (intermediate keeps its state).
 5. The transform runner itself (claims_etl.transform, real dbt subprocess): a STOP in one
    file type (CCLF5) keeps the claim families blocked when a different, clean file type
    that feeds them (CCLF1) arrives next; the state is still published; the fix unblocks it.
@@ -41,6 +45,8 @@ from tests.dbt_harness import (
     _ingest_locally,
     _publish,
     _query,
+    current_delivery,
+    write_resend,
 )
 
 pytestmark = pytest.mark.dbt
@@ -56,8 +62,13 @@ HUMANA_CLAIMS = "source:humana+"
 # --- helpers ---------------------------------------------------------------------------
 
 
+def _month_dir(raw: Path, feed: str, file_type: str, month: str) -> Path:
+    return raw / feed / file_type / f"delivery_month={month}"
+
+
 def _partition(raw: Path, feed: str, file_type: str, month: str) -> Path:
-    return raw / feed / file_type / f"delivery_month={month}" / "part-0.parquet"
+    """The current delivery of one file (its checksum=<sha>/part-0.parquet)."""
+    return current_delivery(_month_dir(raw, feed, file_type, month))
 
 
 def _edit(path: Path, column: str, rows: list[int], value) -> None:
@@ -94,7 +105,7 @@ def _plain_paid_lines(raw_store: Path, path: Path, count: int) -> list[int]:
     """Row positions of paid, non-capitated originals whose claim is never reversed or
     replaced anywhere, so raising their paid amount leaves claim-family netting intact."""
     actioned = set()
-    for part in raw_store.glob("humana/ma/medical_claim_lines/*/part-0.parquet"):
+    for part in raw_store.glob("humana/ma/medical_claim_lines/*/*/part-0.parquet"):
         t = pq.read_table(part, columns=["CLAIM_ID", "ORIG_CLAIM_ID", "CLAIM_FREQ_CD"])
         actioned |= {c for c, f in zip(t["CLAIM_ID"].to_pylist(), t["CLAIM_FREQ_CD"].to_pylist(),
                                        strict=True) if f != "1"}  # fmt: skip
@@ -174,11 +185,17 @@ def test_stop_skips_intermediate_until_the_file_is_fixed(lake: dict, tmp_path: P
     assert run.returncode != 0
     assert _status(run, "model.claims_lakehouse.int_cclf__claim_families") == "skipped"
 
-    # Corrected re-send of 2023-03: passes, and the incremental state catches up exactly.
-    shutil.copy(_partition(store, "cms/cclf", "claims_header", "2023-03"), bad)
+    # Corrected re-send of 2023-03 (a new delivery next to the bad one): passes, and the
+    # incremental state catches up exactly. The bad delivery stays in raw, superseded.
+    clean = pq.read_table(_partition(store, "cms/cclf", "claims_header", "2023-03"))
+    fixed = write_resend(clean, bad.parent.parent, "claims_header 2023-03")
     run = _run(lake, [CCLF_CLAIMS], ["2023-03"], check=True)
     assert _status(run, "model.claims_lakehouse.int_cclf__claim_families") == "success"
-    assert _families_from(db, "int_cclf__claim_families", _checksum(bad)) > 0
+    assert _families_from(db, "int_cclf__claim_families", _checksum(fixed)) > 0
+    assert _families_from(db, "int_cclf__claim_families", _checksum(bad)) == 0
+    assert bad.is_file()
+    assert _query(db, "select is_current from staging.stg_cclf__deliveries where checksum = "
+                      f"'{_checksum(bad)}'") == [(False,)]  # fmt: skip
     _run(lake, [], None, check=True)  # the other file types' new months
     rebuilt = tmp_path / "rebuilt.duckdb"
     _dbt(["build", "--full-refresh"], raw, rebuilt, tmp_path / "work_rebuilt")
@@ -229,6 +246,58 @@ def test_many_broken_amount_lines_stop_the_build(lake: dict) -> None:
     assert _families_from(db, "int_humana__claim_families", _checksum(broken)) == 0
 
 
+# --- 6. the deliveries index (immutable bronze) -------------------------------------------
+
+
+def test_inconsistent_delivery_index_stops_the_feed(lake: dict) -> None:
+    raw, store = lake["raw"], lake["raw_store"]
+    _publish(store, raw, ["2023-03"])
+    delivery = _partition(raw, "cms/cclf", "claims_header", "2023-03")
+    test = "delivery_index_is_consistent_stg_cclf__deliveries"
+    families = "model.claims_lakehouse.int_cclf__claim_families"
+
+    # A file moved by hand under another checksum folder: its rows no longer match it.
+    misplaced = delivery.parent.parent / f"checksum={'0' * 64}" / "part-0.parquet"
+    misplaced.parent.mkdir()
+    shutil.move(delivery, misplaced)
+    run = _run(lake, [CCLF_CLAIMS], ["2023-03"])
+    assert run.returncode != 0
+    assert _status(run, test) == "fail"
+    assert _status(run, "model.claims_lakehouse.stg_cclf__claims_header") == "skipped"
+    assert _status(run, families) == "skipped"
+    shutil.move(misplaced, delivery)
+    misplaced.parent.rmdir()
+    assert _run(lake, [CCLF_CLAIMS], ["2023-03"]).returncode == 0
+
+    # A re-send ingested at exactly the same time as the original: "current" is ambiguous.
+    tie = write_resend(pq.read_table(delivery), delivery.parent.parent, "tie")
+    table = pq.read_table(tie)
+    ingested = pq.read_table(delivery)["_ingested_at"]
+    pq.write_table(table.set_column(table.schema.get_field_index("_ingested_at"), "_ingested_at",
+                                    ingested), tie)  # fmt: skip
+    run = _run(lake, [CCLF_CLAIMS], ["2023-03"])
+    assert run.returncode != 0
+    assert _status(run, test) == "fail"
+    assert _status(run, families) == "skipped"
+
+
+def test_raw_losing_a_built_delivery_stops_the_feed(lake: dict) -> None:
+    """Immutable bronze: raw never loses a delivery, so a missing one is a STOP that keeps
+    intermediate as it was (the post-hook would otherwise delete every key built from it)."""
+    raw, db = lake["raw"], lake["db"]
+    lost = _partition(raw, "cms/cclf", "claims_header", "2023-02")
+    checksum = _checksum(lost)
+    before = _families_from(db, "int_cclf__claim_families", checksum)
+    assert before > 0
+    lost.unlink()  # a mistaken delete (or a layout change deployed before migrating)
+
+    run = _run(lake, [CCLF_CLAIMS], None)
+    assert run.returncode != 0
+    assert _status(run, "raw_keeps_every_built_delivery_stg_cclf__deliveries") == "fail"
+    assert _status(run, "model.claims_lakehouse.int_cclf__claim_families") == "skipped"
+    assert _families_from(db, "int_cclf__claim_families", checksum) == before
+
+
 # --- 5. the transform runner ---------------------------------------------------------------
 
 
@@ -250,11 +319,15 @@ def test_runner_keeps_feed_blocked_across_file_types(
     raw_vars = {"cclf_raw_root": (raw / "cms" / "cclf").as_posix(),
                 "humana_raw_root": (raw / "humana" / "ma").as_posix()}  # fmt: skip
 
-    def deliver(file_type: str) -> tuple[Path, FileIngested]:
+    def deliver(file_type: str, resend: bool = False) -> tuple[Path, FileIngested]:
         src = _partition(store, "cms/cclf", file_type, "2023-03")
-        dst = _partition(raw, "cms/cclf", file_type, "2023-03")
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src, dst)
+        if resend:  # a corrected re-send: a new delivery next to the current one
+            dst = write_resend(pq.read_table(src), _month_dir(raw, "cms/cclf", file_type,
+                                                              "2023-03"), file_type)  # fmt: skip
+        else:
+            dst = raw / src.relative_to(store)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(src, dst)
         event = FileIngested("cms/cclf/", file_type, "2023-03", _checksum(dst), dst.as_uri(),
                              dst.name, "test-batch")  # fmt: skip
         return dst, event
@@ -288,7 +361,7 @@ def test_runner_keeps_feed_blocked_across_file_types(
     assert saved["triggers"][0]["file_type"] == "claims_header"
 
     # Corrected re-send of the CCLF5 file: passes and builds both files into families.
-    fixed, fixed_event = deliver("part_b_physician_lines")
+    fixed, fixed_event = deliver("part_b_physician_lines", resend=True)
     report = run(fixed_event, "r3")
     assert report.outcome is Outcome.PASSED, report.to_dict()
     assert _families_from(lake["db"], "int_cclf__claim_families", _checksum(header)) > 0

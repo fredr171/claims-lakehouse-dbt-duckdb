@@ -79,7 +79,8 @@ alerts:
       A STOP test failed, so dbt skipped the intermediate models below it; those feeds
       stay pending (their raw checksums are not in intermediate yet). Find the failing
       rows locally from run_results.json, then fix the delivery: re-send the corrected
-      file. Every later build re-checks all months, so this issue closes itself on the
+      file under the same name. The bad delivery stays in raw, marked superseded
+      (stg_<feed>__deliveries), and staging reads only the new one. Every later build re-checks all months, so this issue closes itself on the
       first passed or warned run for these feeds.
     error: >-
       The build could not run (dbt crash, SQL error, S3 trouble or a state conflict). The

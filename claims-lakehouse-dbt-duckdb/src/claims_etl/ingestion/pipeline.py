@@ -5,7 +5,8 @@
 3. Validate.                     -> failure? quarantine + .error.json.
 4. Write Parquet locally.
 5. Reconcile row counts.         -> mismatch? quarantine.
-6. Upload to raw (deterministic part-0.parquet, so re-runs overwrite).
+6. Upload to raw: one key per delivered file (delivery month + checksum), so a
+   corrected re-send sits next to the original; a re-run rewrites only its own key.
 7. Write the manifest, publish FileIngested, archive the file.
 
 The event is published before the archive, on both the success and the duplicate
@@ -181,11 +182,13 @@ def _run(
         return
 
     # Steps 6-7: publish, record, archive
-    raw_key = ft.raw_key(validation.name_groups)
+    raw_key = ft.raw_key(validation.name_groups, record.checksum)
     store.upload(local_parquet, config.raw_bucket, raw_key)
     record.output_uri = s3_uri(config.raw_bucket, raw_key)
     record.outcome = Outcome.SUCCESS
-    record.landing_destination_uri = s3_uri(config.landing_bucket, config.archive_prefix + s3_key)
+    record.landing_destination_uri = s3_uri(
+        config.landing_bucket, config.archive_key(s3_key, record.checksum)
+    )
     record.finished_at = utc_now()
     manifest.write_manifest(store, config, record)
     # If publishing or this move fails, the run reports `error`; the next run sees
@@ -230,8 +233,9 @@ def _publish(
 
 
 def _archive(record: ManifestRecord, config: IngestionConfig, store: S3Store) -> None:
-    """Move the file to archive/<original key>."""
-    archive_key = config.archive_prefix + record.source_key
+    """Move the file to archive/<feed>/<file_type>/checksum=<sha256>/<file_name>."""
+    assert record.checksum is not None
+    archive_key = config.archive_key(record.source_key, record.checksum)
     store.move(config.landing_bucket, record.source_key, archive_key)
     record.landing_destination_uri = s3_uri(config.landing_bucket, archive_key)
 
@@ -239,8 +243,10 @@ def _archive(record: ManifestRecord, config: IngestionConfig, store: S3Store) ->
 def _quarantine(
     record: ManifestRecord, failure: CheckResult, config: IngestionConfig, store: S3Store
 ) -> None:
-    """Move the file to quarantine/, write <file>.error.json beside it, record the manifest."""
-    quarantine_key = config.quarantine_prefix + record.source_key
+    """Move the file to quarantine/.../checksum=<sha256>/, write <file>.error.json beside it,
+    record the manifest. Keyed by checksum, so two bad deliveries never overwrite each other."""
+    assert record.checksum is not None
+    quarantine_key = config.quarantine_key(record.source_key, record.checksum)
     record.outcome = Outcome.QUARANTINED
     record.failed_check = failure.name
     record.failure_details = failure.details

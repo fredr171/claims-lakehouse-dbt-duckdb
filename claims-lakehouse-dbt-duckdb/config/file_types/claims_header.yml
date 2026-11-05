@@ -5,9 +5,11 @@ landing_prefix: cms/cclf/
 file_type: claims_header
 
 # Named groups are available to raw_key_template. Raw is partitioned by
-# delivery month (from the file name), never by claim dates.
+# delivery month (from the file name), never by claim dates, then by the file's
+# SHA-256 ({checksum}, filled in by ingestion): every delivery keeps its own key, so a
+# corrected re-send sits next to the original (immutable bronze; dbt picks the current).
 file_name_regex: '^CCLF1_(?P<year>\d{4})(?P<month>0[1-9]|1[0-2])\.csv$'
-raw_key_template: 'cms/cclf/claims_header/delivery_month={year}-{month}/part-0.parquet'
+raw_key_template: 'cms/cclf/claims_header/delivery_month={year}-{month}/checksum={checksum}/part-0.parquet'
 
 key_columns:
   - CUR_CLM_UNIQ_ID

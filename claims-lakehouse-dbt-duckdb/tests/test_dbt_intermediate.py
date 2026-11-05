@@ -3,15 +3,17 @@
 Both root generators (CMS CCLF and Humana MA, same seed) write all 36 months plus their
 answer keys into a temp folder; each CSV goes through the real ingestion code
 (validate_file + write_parquet) into a local raw folder laid out per feed exactly like
-S3 (<feed>/<file_type>/delivery_month=...); dbt then builds every model against it.
+S3 (<feed>/<file_type>/delivery_month=.../checksum=...); dbt then builds every model.
 Checks:
 
 1. Full refresh matches both generators' answer keys: CMS (members, changes, claim
    actions, net paid by service month and by load month) and Humana (members, changes,
    voids/replacements, net paid by service month, capitated encounters, totals).
 2. Incremental: the same 36 months added in uneven batches equals the full refresh.
-3. Re-sends: replacing two old months (a dropped beneficiary, a dropped claim, a
-   changed amount) incrementally equals a full refresh of the same raw data.
+3. Re-sends: corrected re-sends of old months (a dropped beneficiary, a dropped claim, a
+   changed amount) are written NEXT TO the originals (immutable bronze); staging switches
+   to them, the originals stay in raw as superseded, and incremental equals a full
+   refresh of the same raw data.
 
 Slow (~2 min, several dbt runs). Skip with: pytest -m "not dbt".
 """
@@ -19,7 +21,6 @@ Slow (~2 min, several dbt runs). Skip with: pytest -m "not dbt".
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -37,6 +38,8 @@ from tests.dbt_harness import (
     _ingest_locally,
     _publish,
     _query,
+    current_delivery,
+    write_resend,
 )
 
 pytestmark = pytest.mark.dbt
@@ -415,14 +418,11 @@ def test_humana_totals_match_summary(generated, full_build) -> None:
 
 
 def _resend(raw: Path, file_type: str, month: str, edit, feed: str = "cms/cclf") -> None:
-    """Replace one delivery with a corrected re-send (new rows, new checksum)."""
-    path = raw / feed / file_type / f"delivery_month={month}" / "part-0.parquet"
-    table = edit(pq.read_table(path))
-    checksum = hashlib.sha256(f"resent {file_type} {month}".encode()).hexdigest()
-    column = table.schema.get_field_index("_source_checksum")
-    checksums = pa.array([checksum] * len(table), pa.string())
-    table = table.set_column(column, "_source_checksum", checksums)
-    pq.write_table(table, path)
+    """A corrected re-send of one delivery (edited rows, new checksum), written NEXT TO the
+    original as ingestion does (immutable bronze); staging must switch to it."""
+    month_dir = raw / feed / file_type / f"delivery_month={month}"
+    table = edit(pq.read_table(current_delivery(month_dir)))
+    write_resend(table, month_dir, f"{file_type} {month}")
 
 
 def _drop_rows(table, column: str, values: set[str]):
@@ -511,3 +511,19 @@ def test_incremental_batches_then_resends_equal_full_refresh(generated, full_bui
     assert _query(db, versions.format(member_updated)) < _query(
         full_build, versions.format(member_updated)
     )
+
+    # Immutable bronze: every original is still in raw, listed as superseded by its re-send.
+    for feed, file_types in (
+        ("cclf", ["beneficiary_demographics", "claims_header"]),
+        ("humana", ["medical_claim_lines", "member_eligibility"]),
+    ):
+        superseded = _query(
+            db,
+            f"""
+            select file_type, deliveries_of_file, checksum <> current_checksum
+            from staging.stg_{feed}__deliveries where not is_current order by file_type""",
+        )
+        assert superseded == [(ft, 2, True) for ft in file_types], feed
+    [(current_rows,)] = _query(db, "select count(*) from staging.stg_cclf__deliveries"
+                                   " where is_current")  # fmt: skip
+    assert current_rows == 4 * len(months)  # one current delivery per file

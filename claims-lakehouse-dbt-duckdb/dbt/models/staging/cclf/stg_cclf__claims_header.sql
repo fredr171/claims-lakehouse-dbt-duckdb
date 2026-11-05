@@ -1,10 +1,12 @@
 -- CCLF1 Part A claim header: one row per claim version per delivery, typed and renamed.
 -- Identifiers and codes stay text (leading zeros); empty strings become NULL.
--- No filtering or de-duplication: cancellations/adjustments are resolved downstream.
+-- No row filtering or de-duplication: cancellations/adjustments are resolved downstream
+-- (only superseded deliveries of a file are left out, see stg_cclf__deliveries).
 
 with source as (
 
-    select * from {{ source('cclf', 'claims_header') }}
+    -- Only the current delivery of each file; superseded re-sends stay in raw.
+    {{ current_delivery_rows('cclf', 'claims_header') }}
 
 ),
 

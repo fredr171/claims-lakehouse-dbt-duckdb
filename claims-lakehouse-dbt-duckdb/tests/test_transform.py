@@ -108,7 +108,9 @@ def test_success_and_duplicate_publish_quarantine_does_not(s3, config, valid_csv
     assert (first.feed, first.file_type, first.delivery_month) == (
         "cms/cclf/", "claims_header", "2023-01"
     )  # fmt: skip
-    assert first.raw_uri.endswith("delivery_month=2023-01/part-0.parquet")
+    assert first.raw_uri.endswith(
+        f"delivery_month=2023-01/checksum={first.checksum}/part-0.parquet"
+    )
     assert (first.redelivered, again.redelivered) == (False, True)
     assert again.checksum == first.checksum
 

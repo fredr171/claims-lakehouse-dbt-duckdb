@@ -115,3 +115,14 @@ variable "transform_max_receive_count" {
   type        = number
   default     = 3
 }
+
+variable "noncurrent_version_retention_days" {
+  description = "Days an overwritten or deleted object version stays restorable in the landing and raw buckets."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.noncurrent_version_retention_days >= 1
+    error_message = "noncurrent_version_retention_days must be at least 1."
+  }
+}

@@ -10,8 +10,8 @@ raw_bucket: fredr-claims-raw-2026
 landing_prefixes:
   - cms/cclf/                      # CMS CCLF (Medicare fee-for-service)
   - humana/ma/                     # Humana Medicare Advantage
-archive_prefix: archive/           # in the landing bucket; mirrors the original key
-quarantine_prefix: quarantine/     # in the landing bucket; mirrors the original key
+archive_prefix: archive/           # landing bucket; <feed>/<file_type>/checksum=<sha256>/<file_name>
+quarantine_prefix: quarantine/     # landing bucket; same layout as archive/ (+ .error.json)
 manifest_prefix: _manifests/       # in the raw bucket; one <sha256>.json per processed file
 
 # Defaults; a file type may override any of these under its own `limits:` key.

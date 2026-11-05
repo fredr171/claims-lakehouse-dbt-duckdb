@@ -2,14 +2,17 @@ sources:
   - name: cclf
     description: >
       Raw (bronze) CCLF deliveries written by the ingestion Lambda: one Parquet file per
-      file type per delivery month, every source column as VARCHAR exactly as delivered,
-      plus ingestion metadata columns. Partitioned by delivery_month (from the file name).
+      DELIVERED FILE, every source column as VARCHAR exactly as delivered, plus ingestion
+      metadata columns. Immutable: partitioned by delivery_month (from the file name) and
+      checksum (the file's SHA-256), so a corrected re-send sits next to the original.
+      stg_cclf__deliveries decides which delivery of each file is current.
     config:
-      # {name} is the table name below. hive_types_autocast = false keeps the partition
-      # value as text ('2023-01'); staging turns it into a date. cclf_raw_root defaults
+      # {name} is the table name below: <file_type>/delivery_month=*/checksum=*/part-0.parquet.
+      # hive_types_autocast = false keeps both partition values as text ('2023-01');
+      # staging turns delivery_month into a date. cclf_raw_root defaults
       # to the S3 raw bucket (dbt_project.yml); tests point it at a local folder.
       external_location: >-
-        read_parquet('{{ var("cclf_raw_root") }}/{name}/*/*.parquet',
+        read_parquet('{{ var("cclf_raw_root") }}/{name}/*/*/*.parquet',
         hive_partitioning = true, hive_types_autocast = false)
       loaded_at_field: _ingested_at
       freshness:

@@ -71,22 +71,31 @@ file names are kept exactly as delivered. Partitions use Hive style (key=value).
 <feed> = cms/cclf | humana/ma
 landing: <feed>/<file_type>/<file_name>.csv            e.g. cms/cclf/claims_header/CCLF1_202301.csv
                                                             humana/ma/member_eligibility/HUM_ELIG_202301.csv
-raw:     <feed>/<file_type>/delivery_month=<yyyy-mm>/part-0.parquet
+raw:     <feed>/<file_type>/delivery_month=<yyyy-mm>/checksum=<sha256>/part-0.parquet
          _manifests/<sha256>.json   (one record per processed file; written only by ingestion)
          _tickets/<sha256>.json     (quarantine ticket record; written only by the notifier)
          _transform/state/claims_lakehouse.duckdb (+ .previous.duckdb)  (transform runner only)
          _transform/runs/<run_id>/report.json, run_results.json         (transform runner only)
-landing archive/quarantine mirror the original key:
-         archive/<feed>/<file_type>/<file_name>.csv
-         quarantine/<feed>/<file_type>/<file_name>.csv
-         quarantine/<feed>/<file_type>/<file_name>.csv.error.json
+landing archive/quarantine: one key per delivery (checksum folder, file name kept):
+         archive/<feed>/<file_type>/checksum=<sha256>/<file_name>.csv
+         quarantine/<feed>/<file_type>/checksum=<sha256>/<file_name>.csv
+         quarantine/<feed>/<file_type>/checksum=<sha256>/<file_name>.csv.error.json
 ```
 
-Raw partitions encode DELIVERY identity (what the file name says), never data
-content such as claim dates. Each delivery month gets its own partition; a
-corrected re-send of the same file overwrites its own partition. Never split or
-edit a delivered file to change partitioning; late-arriving claims, cancellations
-and adjustments of earlier months, and cross-delivery dedup belong in dbt.
+IMMUTABLE BRONZE (2026-11-05): nothing a payer delivers is ever overwritten or deleted by
+the pipeline. Raw partitions encode DELIVERY identity: the delivery month (from the file
+name, never data content such as claim dates) and the file's SHA-256. A corrected re-send
+of a file (same name, new content) lands NEXT TO the original; dbt decides which delivery
+is current (`stg_<feed>__deliveries`: latest `_ingested_at` per file name; staging reads
+only current deliveries). Raw file type templates must contain `{checksum}` (config
+validation enforces it). Re-sending bytes identical to an earlier delivery is a
+`skipped_duplicate` and does not make that delivery current again. Never split or edit a
+delivered file to change partitioning; late-arriving claims, cancellations and
+adjustments of earlier months, and cross-delivery dedup belong in dbt. Landing and raw
+have versioning + a lifecycle rule (infra/terraform/storage.tf; noncurrent versions kept
+`noncurrent_version_retention_days`, default 90) as the safety net for mistakes. Objects
+ingested before the switch are moved by `scripts/migrate_to_immutable_bronze.py`
+(manifests get a `layout_migration` note with the old locations).
 
 ## Ingestion rules (landing -> raw)
 
@@ -115,14 +124,17 @@ and adjustments of earlier months, and cross-delivery dedup belong in dbt.
    `.csv` in fredr-claims-landing-2026 (us-east-2).
 2. Compute SHA-256 of the file. If a successful manifest record with that
    checksum exists -> outcome `skipped_duplicate`, move file to `archive/`, stop.
-3. Run validation checks (below). Any failure -> move file to `quarantine/`,
-   write `<file_name>.error.json` next to it, outcome `quarantined`, stop.
+3. Run validation checks (below). Any failure -> move file to
+   `quarantine/.../checksum=<sha256>/`, write `<file_name>.error.json` next to it,
+   outcome `quarantined`, stop.
 4. Read ALL columns as VARCHAR, append metadata columns, write Parquet LOCALLY first.
 5. Reconcile: Parquet row count must equal CSV data row count. Mismatch ->
    quarantine. Only upload to raw after reconciliation passes.
-6. Upload Parquet to fredr-claims-raw-2026 using the key layout above, with a
-   deterministic file name (`part-0.parquet`) so re-runs overwrite, not duplicate.
-7. Write manifest record, outcome `success`, move file to `archive/`.
+6. Upload Parquet to fredr-claims-raw-2026 using the key layout above: one key per
+   delivery (`delivery_month=<m>/checksum=<sha256>/part-0.parquet`), so a re-run rewrites
+   only its own key and a re-send never touches the original.
+7. Write manifest record, outcome `success`, move file to
+   `archive/<feed>/<file_type>/checksum=<sha256>/<file_name>`.
 
 S3 has no move: copy, verify the copy exists, then delete the original.
 
@@ -262,9 +274,15 @@ ticket result recorded.
   same column name in both feeds (beneficiary_mbi, claim_start_date, facility_ccn, ...).
   rename to readable snake_case (description keeps the CMS name), `nullif(x, '')`,
   cast. Dates -> DATE, amounts -> DECIMAL(18,2), counts -> INTEGER; codes and IDs stay
-  VARCHAR (leading zeros, 'NA'). No filtering, no dedup, no business logic: every
-  delivery row is kept. Current-state beneficiaries, claim families, and netting of
-  cancellations/adjustments belong in intermediate.
+  VARCHAR (leading zeros, 'NA'). Staging reads every row of the CURRENT delivery of each
+  file (`current_delivery_rows()`, macros/deliveries.sql) and nothing else: no row
+  filtering, no dedup, no business logic. `stg_<feed>__deliveries` (a table) lists every
+  delivery in raw with is_current / current_checksum. Its STOP tests:
+  `delivery_index_is_consistent` (a misplaced file, or a tie for current) and
+  `raw_keeps_every_built_delivery` (a checksum intermediate was built from is missing
+  from raw entirely: raw lost data, so intermediate is skipped instead of pruned).
+  Current-state beneficiaries, claim families, and netting of cancellations/adjustments
+  belong in intermediate.
 - Intermediate (`models/intermediate/<cclf|humana>/`, incremental tables, schema
   `intermediate`): `int_cclf__beneficiary_versions` / `int_humana__member_versions` (SCD2 by
   attribute hash) and `int_cclf__claim_families` / `int_humana__claim_families`. Humana
@@ -274,7 +292,8 @@ ticket result recorded.
   Incremental by AFFECTED KEYS (macros/incremental_by_affected_keys.sql), never append-only
   and never a delivery-month watermark: each row keeps `_source_checksums`; a run recomputes
   the full history of keys touched by unprocessed or vanished raw files (delete+insert on
-  the key) and a post-hook drops keys whose source rows are gone. Any change here must keep
+  the key) and a post-hook drops keys whose source rows are gone. A superseded delivery
+  counts as vanished (staging no longer shows its checksum), even though it stays in raw. Any change here must keep
   `tests/test_dbt_intermediate.py` passing (answer key + incremental == full refresh,
   including old-month re-sends). After changing a model's LOGIC, run it with
   `--full-refresh`: an incremental run only recomputes affected keys.
@@ -452,5 +471,8 @@ ticket result recorded.
       Deployed (terraform apply: 12 added, 5 changed; no drift after). Live test: forced
       claims-etl-ingest-errors to ALARM -> issue #10 opened, CloudWatch returned it to OK ->
       #10 commented + closed. A real stopped/error transform report has not happened yet
+- [ ] 2026-11-05: immutable bronze (checksum-keyed raw/archive/quarantine, stg_<feed>__deliveries,
+      versioning + lifecycle on landing/raw, migration script) built on branch
+      immutable-bronze; not deployed, S3 objects not migrated yet
 - [ ] Marts to s3://fredr-claims-marts-2026 (external materialization)
 - [ ] Move Terraform state to an S3 backend before CI

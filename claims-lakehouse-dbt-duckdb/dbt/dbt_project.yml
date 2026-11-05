@@ -11,7 +11,8 @@ test-paths: ["tests"]
 clean-targets: ["target", "dbt_packages"]
 
 vars:
-  # Raw (bronze) root per feed: <root>/<file_type>/delivery_month=<yyyy-mm>/*.parquet.
+  # Raw (bronze) root per feed:
+  #   <root>/<file_type>/delivery_month=<yyyy-mm>/checksum=<sha256>/part-0.parquet
   # Override for offline tests: --vars '{cclf_raw_root: ..., humana_raw_root: ...}'.
   cclf_raw_root: s3://fredr-claims-raw-2026/cms/cclf
   humana_raw_root: s3://fredr-claims-raw-2026/humana/ma
