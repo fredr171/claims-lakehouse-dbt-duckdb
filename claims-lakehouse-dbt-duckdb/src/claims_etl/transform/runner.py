@@ -193,7 +193,7 @@ def _dbt_build(
     if report.delivery_months:
         dbt_vars["delivery_months"] = report.delivery_months
     command = [
-        sys.executable, "-m", "dbt.cli.main", "build",
+        sys.executable, "-m", "claims_etl.transform.dbt_cli", "build",  # Lambda-safe locks
         "--select", *report.selectors,
         "--project-dir", str(project),
         "--profiles-dir", str(project),
