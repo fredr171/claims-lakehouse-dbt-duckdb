@@ -15,5 +15,11 @@ feeds:
   cms/cclf/: cclf
   humana/ma/: humana
 
+# A failed build (outcome error) is retried after these delays, by attempt: 1st failure
+# -> 2 min, 2nd -> 5 min, then 10 min (the last value repeats). The handler shortens the
+# messages' visibility to this before raising; without it SQS would wait the queue's
+# full visibility timeout (1 hour). After maxReceiveCount (3) receives -> the DLQ.
+retry_backoff_seconds: [120, 300, 600]
+
 # profiles.yml target. The Lambda overrides it (CLAIMS_DBT_TARGET=lambda).
 dbt_target: dev

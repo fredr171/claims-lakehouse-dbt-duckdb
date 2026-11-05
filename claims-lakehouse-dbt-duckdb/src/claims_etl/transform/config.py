@@ -9,6 +9,8 @@ from pathlib import Path
 from claims_etl.ingestion.config import ConfigError, _read_yaml, default_config_dir, load_config
 
 TARGET_ENV_VAR = "CLAIMS_DBT_TARGET"
+DEFAULT_RETRY_BACKOFF_SECONDS = (120, 300, 600)
+_MAX_VISIBILITY_SECONDS = 43200  # SQS limit (12 hours)
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,9 @@ class TransformConfig:
     runs_prefix: str
     dbt_target: str
     feed_sources: dict[str, str]  # landing prefix -> dbt source name
+    # Delay before a failed batch is retried, by receive count (1st failure, 2nd, ...);
+    # the last value repeats. See transform/lambda_handler.py.
+    retry_backoff_seconds: tuple[int, ...] = DEFAULT_RETRY_BACKOFF_SECONDS
 
     def source_for(self, feed: str) -> str:
         try:
@@ -48,6 +53,20 @@ def load_transform_config(config_dir: Path | str | None = None) -> TransformConf
     if not settings["runs_prefix"].endswith("/"):
         raise ConfigError("transform.yml: runs_prefix must end in '/'")
 
+    backoff = settings.get("retry_backoff_seconds", list(DEFAULT_RETRY_BACKOFF_SECONDS))
+    if (
+        not isinstance(backoff, list)
+        or not backoff
+        or not all(
+            isinstance(s, int) and not isinstance(s, bool) and 0 <= s <= _MAX_VISIBILITY_SECONDS
+            for s in backoff
+        )
+    ):
+        raise ConfigError(
+            "transform.yml: retry_backoff_seconds must be a non-empty list of whole "
+            f"seconds between 0 and {_MAX_VISIBILITY_SECONDS}"
+        )
+
     return TransformConfig(
         region=ingestion.region,
         raw_bucket=ingestion.raw_bucket,
@@ -56,4 +75,5 @@ def load_transform_config(config_dir: Path | str | None = None) -> TransformConf
         runs_prefix=settings["runs_prefix"],
         dbt_target=os.environ.get(TARGET_ENV_VAR) or settings.get("dbt_target", "dev"),
         feed_sources=dict(feeds),
+        retry_backoff_seconds=tuple(backoff),
     )

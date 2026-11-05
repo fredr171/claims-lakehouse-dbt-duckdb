@@ -327,3 +327,151 @@ def test_s3_run_sink_writes_under_run_prefix(s3, tmp_path) -> None:
         f"s3://{RAW_BUCKET}/_transform/runs/run-9/report.json"
     )
     assert s3.get_json(RAW_BUCKET, "_transform/runs/run-9/report.json") == {"ok": 1}
+
+
+# --- retry backoff (lambda_handler.retry_soon) ------------------------------------------------
+
+
+def test_backoff_seconds_by_receive_count() -> None:
+    delays = (120, 300, 600)
+    assert [lambda_handler.backoff_seconds(n, delays) for n in (0, 1, 2, 3, 7)] == [
+        120, 120, 300, 600, 600,
+    ]  # fmt: skip
+
+
+def test_queue_url_from_arn() -> None:
+    arn = "arn:aws:sqs:us-east-2:123456789012:claims-etl-transform.fifo"
+    assert lambda_handler.queue_url_from_arn(arn) == (
+        "us-east-2",
+        "https://sqs.us-east-2.amazonaws.com/123456789012/claims-etl-transform.fifo",
+    )
+    with pytest.raises(ValueError, match="not an SQS"):
+        lambda_handler.queue_url_from_arn("arn:aws:sns:us-east-2:123456789012:topic")
+
+
+class RecordingSqs:
+    """Wraps the moto SQS client and records change_message_visibility_batch calls."""
+
+    def __init__(self, client: Any, fail: bool = False) -> None:
+        self._client, self.fail, self.calls = client, fail, []
+
+    def change_message_visibility_batch(self, **kwargs: Any) -> dict:
+        self.calls.append(kwargs)
+        if self.fail:
+            raise RuntimeError("SQS unavailable")
+        return self._client.change_message_visibility_batch(**kwargs)
+
+
+def _receive(sqs: Any, url: str) -> list[dict]:
+    response = sqs.receive_message(
+        QueueUrl=url, MaxNumberOfMessages=10, AttributeNames=["ApproximateReceiveCount"]
+    )
+    return response["Messages"]
+
+
+def _received_batch(receives: int) -> tuple[list[dict], Any]:
+    """Two real FIFO messages, received `receives` times before; Lambda-shaped records."""
+    sqs = boto3.client("sqs", region_name=REGION)
+    url = sqs.create_queue(
+        QueueName="claims-etl-transform.fifo",
+        Attributes={"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+    )["QueueUrl"]
+    arn = sqs.get_queue_attributes(QueueUrl=url, AttributeNames=["QueueArn"])["Attributes"][
+        "QueueArn"
+    ]
+    body = {"source": EVENT_SOURCE, "detail-type": DETAIL_TYPE, "detail": _event().to_detail()}
+    for month in ("2023-01", "2023-02"):
+        sqs.send_message(QueueUrl=url, MessageGroupId="transform",
+                         MessageBody=json.dumps({**body, "id": month}))  # fmt: skip
+    for _ in range(receives):
+        messages = _receive(sqs, url)
+        # Visible again at once, as after an expired visibility timeout.
+        sqs.change_message_visibility_batch(
+            QueueUrl=url,
+            Entries=[
+                {"Id": str(i), "ReceiptHandle": m["ReceiptHandle"], "VisibilityTimeout": 0}
+                for i, m in enumerate(messages)
+            ],
+        )
+    messages = _receive(sqs, url)
+    records = [
+        {"messageId": m["MessageId"], "receiptHandle": m["ReceiptHandle"], "body": m["Body"],
+         "attributes": m["Attributes"], "eventSourceARN": arn, "awsRegion": REGION}
+        for m in messages
+    ]  # fmt: skip
+    return records, sqs
+
+
+@pytest.mark.parametrize(("earlier_receives", "delay"), [(0, 120), (1, 300), (2, 600)])
+def test_failed_build_is_retried_after_backoff(s3, monkeypatch, earlier_receives, delay) -> None:
+    records, sqs = _received_batch(earlier_receives)
+    assert {r["attributes"]["ApproximateReceiveCount"] for r in records} == {
+        str(earlier_receives + 1)
+    }
+    recorder = RecordingSqs(sqs)
+    monkeypatch.setattr(lambda_handler, "_sqs_client", lambda region: recorder)
+
+    def failing_build(*args: Any, **kwargs: Any) -> None:
+        raise TransformRunError("dbt exited 2: crash")
+
+    monkeypatch.setattr(lambda_handler, "run_transform", failing_build)
+    with pytest.raises(TransformRunError, match="crash"):  # still raised: SQS retries it
+        lambda_handler.handler({"Records": records}, None)
+    [call] = recorder.calls
+    assert call["QueueUrl"].endswith("/claims-etl-transform.fifo")
+    assert sorted(e["ReceiptHandle"] for e in call["Entries"]) == sorted(
+        r["receiptHandle"] for r in records
+    )
+    assert {e["VisibilityTimeout"] for e in call["Entries"]} == {delay}
+
+
+def test_unparseable_batch_is_also_retried_after_backoff(s3, monkeypatch) -> None:
+    records, sqs = _received_batch(0)
+    records[0]["body"] = "not json"
+    recorder = RecordingSqs(sqs)
+    monkeypatch.setattr(lambda_handler, "_sqs_client", lambda region: recorder)
+    with pytest.raises(json.JSONDecodeError):
+        lambda_handler.handler({"Records": records}, None)
+    assert {e["VisibilityTimeout"] for e in recorder.calls[0]["Entries"]} == {120}
+
+
+@pytest.mark.parametrize("outcome", [Outcome.PASSED, Outcome.WARNED, Outcome.STOPPED])
+def test_final_outcomes_leave_visibility_alone(s3, monkeypatch, outcome) -> None:
+    records, sqs = _received_batch(0)
+    recorder = RecordingSqs(sqs)
+    monkeypatch.setattr(lambda_handler, "_sqs_client", lambda region: recorder)
+
+    class Report:
+        run_id, counts = "r", {}
+
+    Report.outcome = outcome
+    monkeypatch.setattr(lambda_handler, "run_transform", lambda *a, **k: Report())
+    assert lambda_handler.handler({"Records": records}, None)["outcome"] == outcome.value
+    assert recorder.calls == []
+
+
+def test_backoff_failure_never_hides_the_build_error(s3, monkeypatch) -> None:
+    records, sqs = _received_batch(0)
+    recorder = RecordingSqs(sqs, fail=True)
+    monkeypatch.setattr(lambda_handler, "_sqs_client", lambda region: recorder)
+
+    def failing_build(*args: Any, **kwargs: Any) -> None:
+        raise TransformRunError("state conflict")
+
+    monkeypatch.setattr(lambda_handler, "run_transform", failing_build)
+    with pytest.raises(TransformRunError, match="state conflict"):
+        lambda_handler.handler({"Records": records}, None)
+    assert len(recorder.calls) == 1
+
+
+@pytest.mark.parametrize("value", [[], [120, "5"], [-1], [43201], [True], "120"])
+def test_transform_config_rejects_bad_backoff(config_dir: Path, value: Any) -> None:
+    path = config_dir / "transform.yml"
+    setting = f"retry_backoff_seconds: {json.dumps(value)}\n"  # the last key wins in YAML
+    path.write_text(path.read_text(encoding="utf-8") + setting, encoding="utf-8")
+    with pytest.raises(ConfigError, match="retry_backoff_seconds"):
+        load_transform_config(config_dir)
+
+
+def test_transform_config_reads_backoff(config_dir: Path) -> None:
+    assert load_transform_config(config_dir).retry_backoff_seconds == (120, 300, 600)

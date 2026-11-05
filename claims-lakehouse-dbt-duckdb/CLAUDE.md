@@ -316,11 +316,15 @@ ticket result recorded.
   `delivery_months` = the events' months (WARN scoping only). dbt runs as a SUBPROCESS
   (process exit closes and checkpoints DuckDB; no dbt state in a warm Lambda) via
   `python -m claims_etl.transform.dbt_cli`, never `dbt.cli.main` directly: Lambda has no
-  /dev/shm, so dbt's multiprocessing locks crash; dbt_cli swaps in threading locks
-  (tests/test_dbt_cli.py simulates the missing semaphores).
+  /dev/shm, so dbt's multiprocessing locks crash; dbt_cli swaps in threading locks on
+  the BASE context (ThreadPool uses the platform default = fork on Linux, not spawn).
+  tests/test_dbt_cli.py simulates Lambda (no semaphores + a non-spawn default context)
+  and runs a real `dbt build`; a `dbt parse`-only or Windows-default test misses it.
 - Outcomes: passed / warned / stopped -> publish the state, write the report, delete the
   messages (final answers). error (model/test could not run, dbt crash, state conflict) ->
-  keep the old state, write the report, raise (retry, then DLQ).
+  keep the old state, write the report, raise (retry, then DLQ). Before raising, the handler
+  sets the batch's visibility to `retry_backoff_seconds` (transform.yml; 2/5/10 min by
+  receive count) so a failure is retried in minutes, not after the queue's 1-hour timeout.
 - State: `s3://fredr-claims-raw-2026/_transform/state/claims_lakehouse.duckdb`, single
   writer, upload conditional on the downloaded ETag (If-None-Match on the first run);
   previous version copied to `claims_lakehouse.previous.duckdb`. Run artifacts:
@@ -414,7 +418,14 @@ ticket result recorded.
       claims-etl-transform) deployed (terraform apply: 17 added, 2 changed); first build via
       `claims-transform --all` passed (143 tests, 10 models); S3 state matches an offline
       build of 2023-01..03 row for row
-- [ ] First live Lambda run (land 2023-04 and check the transform logs + report)
-- [ ] Transform reports -> GitHub issues (notifier extension) + DLQ alarm -> SNS email
+- [x] 2026-11-05: first live Lambda run (2023-04 landed by the user). Found and fixed:
+      FIFO queue needed content-based dedup (EventBridge deliveries failed, PR #7) and
+      dbt's multiprocessing locks crash on Lambda (no /dev/shm; dbt_cli). The retry
+      passed (143 tests, 10 models, 19 s); S3 state matches the local build row for row,
+      which matches both answer keys through 2023-04
+- [ ] Transform retry backoff (2/5/10 min instead of the 1-hour visibility timeout)
+- [ ] Transform reports -> GitHub issues (notifier extension) + CloudWatch alarms (DLQs,
+      EventBridge FailedInvocations, ingest errors) -> SNS -> notifier -> GitHub issues;
+      no email (decided 2026-11-05)
 - [ ] Marts to s3://fredr-claims-marts-2026 (external materialization)
 - [ ] Move Terraform state to an S3 backend before CI
