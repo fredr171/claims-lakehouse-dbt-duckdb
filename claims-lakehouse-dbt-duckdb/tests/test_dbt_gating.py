@@ -2,7 +2,7 @@
 
 A clean baseline (delivery months 2023-01 and 2023-02, both feeds) is built once; each
 scenario copies it, corrupts one raw partition the way a bad delivery would, and runs
-dbt the way the transform runner will: `build --select source:<feed>.<file_type>+`
+dbt the way the transform runner does: `build --select source:<feed>+` (the whole feed)
 with the delivery months being processed. Checks:
 
 1. Clean data raises no failures and no warnings.
@@ -14,12 +14,16 @@ with the delivery months being processed. Checks:
    the intermediate model, and is scoped: a later month's run does not re-raise it,
    an unscoped run does.
 4. Many broken amount lines in one month turn the amount warning into a STOP.
+5. The transform runner itself (claims_etl.transform, real dbt subprocess): a STOP in one
+   file type (CCLF5) keeps the claim families blocked when a different, clean file type
+   that feeds them (CCLF1) arrives next; the state is still published; the fix unblocks it.
 
 Slow (~1 min, several dbt runs). Skip with: pytest -m "not dbt".
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -45,8 +49,8 @@ if not HAS_DBT:
     pytest.skip("needs the root CCLF/Humana generators and the dbt extra", allow_module_level=True)
 
 BASELINE_MONTHS = ["2023-01", "2023-02"]
-CCLF_CLAIMS = "source:cclf.claims_header+"
-HUMANA_CLAIMS = "source:humana.medical_claim_lines+"
+CCLF_CLAIMS = "source:cclf+"  # the runner's selectors (claims_etl.transform.runner)
+HUMANA_CLAIMS = "source:humana+"
 
 
 # --- helpers ---------------------------------------------------------------------------
@@ -223,3 +227,69 @@ def test_many_broken_amount_lines_stop_the_build(lake: dict) -> None:
     assert _status(run, "assert_humana_amounts_mostly_consistent") == "fail"
     assert _status(run, "model.claims_lakehouse.int_humana__claim_families") == "skipped"
     assert _families_from(db, "int_humana__claim_families", _checksum(broken)) == 0
+
+
+# --- 5. the transform runner ---------------------------------------------------------------
+
+
+def test_runner_keeps_feed_blocked_across_file_types(
+    lake: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claims_etl.events import FileIngested
+    from claims_etl.transform.config import load_transform_config
+    from claims_etl.transform.runner import Outcome, run_transform
+    from claims_etl.transform.sinks import LocalRunSink
+    from claims_etl.transform.state import LocalStateStore
+
+    for var in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")  # the profile's S3 secret; unused
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    raw, store = lake["raw"], lake["raw_store"]
+    state = LocalStateStore(lake["db"])
+    raw_vars = {"cclf_raw_root": (raw / "cms" / "cclf").as_posix(),
+                "humana_raw_root": (raw / "humana" / "ma").as_posix()}  # fmt: skip
+
+    def deliver(file_type: str) -> tuple[Path, FileIngested]:
+        src = _partition(store, "cms/cclf", file_type, "2023-03")
+        dst = _partition(raw, "cms/cclf", file_type, "2023-03")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dst)
+        event = FileIngested("cms/cclf/", file_type, "2023-03", _checksum(dst), dst.as_uri(),
+                             dst.name, "test-batch")  # fmt: skip
+        return dst, event
+
+    def run(event: FileIngested, name: str):
+        return run_transform([event], config=load_transform_config(), state=state,
+                             sink=LocalRunSink(tmp_path / "runs", name), extra_vars=raw_vars,
+                             run_id=name, work_dir=tmp_path)  # fmt: skip
+
+    # CCLF5 for 2023-03 arrives with a duplicated (claim_id, line_number) key: STOP.
+    lines, lines_event = deliver("part_b_physician_lines")
+    table = pq.read_table(lines)
+    for column in ("CUR_CLM_UNIQ_ID", "CLM_LINE_NUM", "BENE_MBI_ID"):
+        _edit(lines, column, [1], table[column][0].as_py())
+    report = run(lines_event, "r1")
+    assert report.outcome is Outcome.STOPPED and report.published
+    assert [s["name"] for s in report.stops] == [
+        "unique_combination_of_columns_stg_cclf__part_b_physician_lines_claim_id__line_number"
+    ]
+    assert "model.claims_lakehouse.int_cclf__claim_families" in report.skipped
+    assert _families_from(lake["db"], "int_cclf__claim_families", _checksum(lines)) == 0
+
+    # Then a clean CCLF1, which also feeds the claim families. Selecting only
+    # source:cclf.claims_header+ would skip the CCLF5 stop and build families with the
+    # bad lines; the runner builds the whole feed, so the stop runs and still blocks.
+    header, header_event = deliver("claims_header")
+    report = run(header_event, "r2")
+    assert report.outcome is Outcome.STOPPED
+    assert _families_from(lake["db"], "int_cclf__claim_families", _checksum(header)) == 0
+    saved = json.loads((tmp_path / "runs" / "r2" / "report.json").read_text(encoding="utf-8"))
+    assert saved["triggers"][0]["file_type"] == "claims_header"
+
+    # Corrected re-send of the CCLF5 file: passes and builds both files into families.
+    fixed, fixed_event = deliver("part_b_physician_lines")
+    report = run(fixed_event, "r3")
+    assert report.outcome is Outcome.PASSED, report.to_dict()
+    assert _families_from(lake["db"], "int_cclf__claim_families", _checksum(header)) > 0
+    assert _families_from(lake["db"], "int_cclf__claim_families", _checksum(fixed)) > 0

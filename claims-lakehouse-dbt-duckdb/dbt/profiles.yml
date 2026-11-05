@@ -15,3 +15,22 @@ claims_lakehouse:
         - type: s3
           provider: credential_chain
           region: us-east-2
+    # Transform Lambda (claims_etl/transform). The runner points CLAIMS_DUCKDB_PATH at its
+    # /tmp working copy. Extensions are bundled in the package (scripts/build_lambda.py
+    # --transform), never downloaded at run time; credential_chain needs the aws extension.
+    lambda:
+      type: duckdb
+      path: "{{ env_var('CLAIMS_DUCKDB_PATH') }}"
+      threads: 4
+      extensions:
+        - httpfs
+        - parquet
+        - aws
+      settings:
+        extension_directory: "{{ env_var('CLAIMS_DUCKDB_EXTENSION_DIR', '/var/task/duckdb_extensions') }}"
+        autoinstall_known_extensions: false
+        autoload_known_extensions: true
+      secrets:
+        - type: s3
+          provider: credential_chain
+          region: us-east-2

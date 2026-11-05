@@ -6,7 +6,11 @@
 4. Write Parquet locally.
 5. Reconcile row counts.         -> mismatch? quarantine.
 6. Upload to raw (deterministic part-0.parquet, so re-runs overwrite).
-7. Write the manifest, archive the file.
+7. Write the manifest, publish FileIngested, archive the file.
+
+The event is published before the archive, on both the success and the duplicate
+path: if publishing fails the run ends in ``error`` with the file still in landing,
+and the retry (now a duplicate) publishes again before archiving.
 
 Data problems end in ``quarantined``. Infrastructure problems (S3, network,
 disk) end in ``error`` and leave the file where it is, so a re-run retries it.
@@ -19,6 +23,7 @@ import posixpath
 import tempfile
 from pathlib import Path
 
+from claims_etl.events import EventBridgePublisher, EventPublisher, FileIngested
 from claims_etl.ingestion import manifest
 from claims_etl.ingestion.checks import check_row_count_reconciliation
 from claims_etl.ingestion.config import IngestionConfig, load_config
@@ -39,6 +44,7 @@ def process_file(
     store: S3Store | None = None,
     batch_id: str | None = None,
     work_dir: Path | None = None,
+    publisher: EventPublisher | None = None,
 ) -> ManifestRecord:
     """Ingest one landing CSV into the raw bucket. Never raises for bad data.
 
@@ -48,6 +54,8 @@ def process_file(
         store: S3 access; defaults to a boto3 client in the configured region.
         batch_id: Run ID shared by every file in one run; generated if omitted.
         work_dir: Parent dir for the temporary working folder.
+        publisher: FileIngested publisher; defaults to EventBridge when the config
+            enables publish_events, else none.
 
     Returns:
         The manifest record describing what happened.
@@ -56,6 +64,8 @@ def process_file(
     if not config.is_landing_file(s3_key):
         raise ValueError(f"{s3_key!r} is not a .csv under {list(config.landing_prefixes)}")
     store = store or S3Store.for_region(config.region)
+    if publisher is None and config.publish_events:
+        publisher = EventBridgePublisher.for_region(config.region)
 
     record = ManifestRecord(
         source_uri=s3_uri(config.landing_bucket, s3_key),
@@ -68,7 +78,7 @@ def process_file(
 
     try:
         with tempfile.TemporaryDirectory(prefix="claims_etl_", dir=work_dir) as tmp:
-            _run(s3_key, record, config, store, Path(tmp))
+            _run(s3_key, record, config, store, Path(tmp), publisher)
     except Exception as exc:  # noqa: BLE001 - one failing file must not crash a scan
         record.outcome = Outcome.ERROR
         record.failure_details = f"{type(exc).__name__}: {exc}"
@@ -90,7 +100,12 @@ def process_file(
 
 
 def _run(
-    s3_key: str, record: ManifestRecord, config: IngestionConfig, store: S3Store, tmp: Path
+    s3_key: str,
+    record: ManifestRecord,
+    config: IngestionConfig,
+    store: S3Store,
+    tmp: Path,
+    publisher: EventPublisher | None,
 ) -> None:
     """Carry out the flow, updating ``record`` in place."""
     local_csv = tmp / "source.csv"  # fixed local name: never trust the key as a path
@@ -110,8 +125,11 @@ def _run(
         assert existing is not None
         record.outcome = Outcome.SKIPPED_DUPLICATE
         record.output_uri = existing.get("output_uri")
+        record.file_type = existing.get("file_type")
+        record.name_fields = dict(existing.get("name_fields") or {})
         # The existing success record is left untouched; overwriting it would
         # make the next copy of this file look new.
+        _publish(record, config, publisher, redelivered=True)
         _archive(record, config, store)
         return
 
@@ -170,9 +188,45 @@ def _run(
     record.landing_destination_uri = s3_uri(config.landing_bucket, config.archive_prefix + s3_key)
     record.finished_at = utc_now()
     manifest.write_manifest(store, config, record)
-    # If this move fails the run reports `error`; the next run sees the success
-    # record, reports skipped_duplicate, and finishes the archive.
+    # If publishing or this move fails, the run reports `error`; the next run sees
+    # the success record, reports skipped_duplicate, publishes, and archives.
+    _publish(record, config, publisher, redelivered=False)
     _archive(record, config, store)
+
+
+def _publish(
+    record: ManifestRecord,
+    config: IngestionConfig,
+    publisher: EventPublisher | None,
+    *,
+    redelivered: bool,
+) -> None:
+    """Announce that the file is in raw (no-op without a publisher)."""
+    if publisher is None:
+        return
+    feed = config.landing_prefix_for_key(record.source_key)
+    year, month = record.name_fields.get("year"), record.name_fields.get("month")
+    if not (feed and record.file_type and year and month and record.checksum):
+        raise ValueError(f"cannot describe {record.source_key!r} as a FileIngested event")
+    event = FileIngested(
+        feed=feed,
+        file_type=record.file_type,
+        delivery_month=f"{year}-{month}",
+        checksum=record.checksum,
+        raw_uri=record.output_uri or "",
+        file_name=record.file_name,
+        batch_id=record.batch_id,
+        redelivered=redelivered,
+    )
+    publisher.publish(event)
+    log_event(
+        logger,
+        "event_published",
+        key=record.source_key,
+        file_type=event.file_type,
+        delivery_month=event.delivery_month,
+        redelivered=redelivered,
+    )
 
 
 def _archive(record: ManifestRecord, config: IngestionConfig, store: S3Store) -> None:

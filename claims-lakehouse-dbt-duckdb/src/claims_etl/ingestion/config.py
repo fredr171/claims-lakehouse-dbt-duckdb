@@ -87,6 +87,7 @@ class IngestionConfig:
     manifest_prefix: str
     parquet_batch_rows: int
     file_types: dict[str, FileTypeConfig]
+    publish_events: bool = False  # FileIngested events for the transform runner
 
     def landing_prefix_for_key(self, key: str) -> str | None:
         """The feed prefix the key sits under, or None (prefixes never overlap)."""
@@ -157,6 +158,7 @@ def load_config(config_dir: Path | str | None = None) -> IngestionConfig:
         landing_prefixes=landing_prefixes,
         parquet_batch_rows=int(settings.get("parquet_batch_rows", 50_000)),
         file_types=file_types,
+        publish_events=_parse_bool(settings.get("publish_events", False), "publish_events"),
         **prefixes,
     )
 
@@ -176,6 +178,12 @@ def _parse_landing_prefixes(value: Any, other_prefixes: dict[str, str]) -> tuple
             if prefix.startswith(other) or other.startswith(prefix):
                 raise ConfigError(f"landing prefixes must not overlap: {prefix!r} and {other!r}")
     return tuple(value)
+
+
+def _parse_bool(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name} must be true or false, got {value!r}")
+    return value
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

@@ -12,6 +12,7 @@ No real claims, PHI, or PII are used anywhere.
 ```
 landing (S3, .csv)  ──►  raw / bronze (S3, Parquet)  ──►  staging + intermediate / silver (DuckDB via dbt)  ──►  marts / gold (S3, Parquet)
    └── ingestion (Python, Lambda) ──┘                        └──────── dbt-duckdb (staging + intermediate built; next: marts) ────────┘
+                                  └── FileIngested event ──► transform Lambda (dbt build per feed)
 ```
 
 | Layer | Location | Format |
@@ -375,10 +376,11 @@ Uploading a `.csv` under `s3://fredr-claims-landing-2026/cms/cclf/` triggers the
 | Logs | `/aws/lambda/claims-etl-ingest`, JSON lines, 30-day retention |
 | Notifier | `claims-etl-notify` (`notifier.tf`): 256 MB, 300 s timeout, same package without the pandas layer; trigger `quarantine/*.error.json` |
 
-Deploy or update:
+Deploy or update (both packages; the transform Lambda is in the next section):
 
 ```bash
-.venv/Scripts/python scripts/build_lambda.py        # rebuild the package
+.venv/Scripts/python scripts/build_lambda.py              # ingest + notify package
+.venv/Scripts/python scripts/build_lambda.py --transform  # transform package
 cd infra/terraform
 terraform init                                       # first time only
 terraform plan -out=tfplan && terraform apply tfplan
@@ -386,10 +388,68 @@ terraform plan -out=tfplan && terraform apply tfplan
 
 Terraform state is local (gitignored). Move it to an S3 backend before CI or anyone else runs it.
 
+## Event-driven transforms (staging + intermediate)
+
+Every file that ingestion puts in raw triggers a dbt build of its feed, with no schedule:
+
+```
+claims-etl-ingest ──FileIngested──► EventBridge rule ──► SQS FIFO (one message group) ──► claims-etl-transform
+                                                              └── after 3 failed receives ──► dead-letter queue
+```
+
+1. **Event.** After the manifest is written and before the landing file is archived,
+   ingestion publishes `FileIngested` (feed, file type, delivery month, checksum, raw URI) to
+   the default EventBridge bus ([`events.py`](src/claims_etl/events.py)). If publishing fails,
+   the run ends in `error` with the file still in landing. The retry finds it already loaded
+   (`skipped_duplicate`), publishes again with `redelivered: true`, and archives it.
+2. **Queue.** A FIFO queue with a single message group runs builds one at a time, in order.
+   Up to 10 waiting events share one build.
+3. **Build** ([`transform/runner.py`](src/claims_etl/transform/runner.py)). The runner selects
+   the **whole feed** (`source:cclf+` / `source:humana+`), not just the file type that arrived.
+   A bad CCLF5 file must keep blocking claim families even when a clean CCLF1 comes next. With
+   `source:cclf.claims_header+` the CCLF5 stop tests would not run, and the bad lines would
+   flow in (`test_dbt_gating.py` checks this). `delivery_months` is set to the events' months,
+   so only the WARN tests are scoped (see [Stop vs warn](#stop-vs-warn)). dbt runs in a
+   subprocess against a **working copy** of the DuckDB state file.
+4. **Outcome.** The runner reads `run_results.json` and records one of four outcomes:
+
+   | Outcome | Meaning | State | Queue |
+   |---|---|---|---|
+   | `passed` | all tests pass | published | message deleted |
+   | `warned` | WARN tests found issues; intermediate built | published | deleted |
+   | `stopped` | a STOP test failed; dbt skipped the intermediate models below it | published (the stopped feed stays pending: its checksum is not in intermediate yet) | deleted |
+   | `error` | a model or test could not run (SQL error, S3 trouble) or dbt crashed | **kept** | raised → retried → DLQ |
+
+   A run report (`report.json`: outcome, test names, failure **counts**, skipped models, the
+   triggering files; never row values) and `run_results.json` go to
+   `s3://fredr-claims-raw-2026/_transform/runs/<run_id>/`.
+5. **State.** The DuckDB file lives at `_transform/state/claims_lakehouse.duckdb` in the raw
+   bucket. The upload is conditional on the ETag downloaded at the start (`If-Match`, or
+   `If-None-Match` for the first run), so a second writer can never silently overwrite it.
+   The previous version is copied to `claims_lakehouse.previous.duckdb` first.
+
+Run the same build by hand ([`transform/cli.py`](src/claims_etl/transform/cli.py)):
+
+```bash
+claims-transform --feed cclf --months 2023-03     # S3 state + S3 raw, exactly like the Lambda
+claims-transform --all                            # both feeds; WARN tests over all history
+claims-transform --all --db dbt/claims_lakehouse.duckdb --raw-root <folder>   # fully local
+```
+
+Exit codes: 0 = passed or warned, 2 = stopped, 1 = error.
+
+| Resource (`transform.tf`) | Details |
+|---|---|
+| Lambda `claims-etl-transform` | Python 3.13, 2048 MB, 600 s timeout, 2 GB `/tmp`; dbt target `lambda` |
+| Package | `build/transform_lambda.zip` (`build_lambda.py --transform`): dbt-core, dbt-duckdb, duckdb at the locally tested versions, the dbt project, and the DuckDB `httpfs` + `aws` extensions (nothing is downloaded at run time). 219 MiB unzipped (limit 250): the unused 275 MB dbt v2 parser binary is replaced by an empty placeholder wheel, and Babel's locale data is cut to English. 72 MB zipped, so it deploys through `s3://fredr-claims-artifacts-2026` |
+| Queue | `claims-etl-transform.fifo`, visibility timeout 3600 s (6 × the function timeout), DLQ `claims-etl-transform-dlq.fifo` (14 days) |
+| Rule | `source = claims-etl.ingestion`, `detail-type = FileIngested` → queue, message group `transform` |
+| IAM | Read raw feed prefixes; read/write `_transform/*`; consume its queue; own log group. Ingestion gains `events:PutEvents` on the default bus, limited to its own source |
+
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 176 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest      # 195 tests; no AWS or GitHub access (moto + responses)
 .venv/Scripts/python -m pytest -m "not dbt"   # skip the ~4 min dbt end-to-end tests
 .venv/Scripts/python -m ruff check src tests
 ```
@@ -416,7 +476,7 @@ real config:
 ## Project layout
 
 ```
-config/                     ingestion.yml, notifications.yml, file_types/*.yml
+config/                     ingestion.yml, notifications.yml, transform.yml, file_types/*.yml
 src/claims_etl/ingestion/
   pipeline.py               process_file orchestration
   validation.py             runs checks in order
@@ -428,6 +488,13 @@ src/claims_etl/ingestion/
   log.py / utils.py          JSON-lines logging, checksum and time helpers (shared)
   cli.py / lambda_handler.py
 src/claims_etl/s3_events.py S3 event parsing shared by both handlers (no pyarrow)
+src/claims_etl/events.py    FileIngested event (ingestion -> EventBridge -> transform)
+src/claims_etl/transform/
+  runner.py                 run_transform: select feeds, dbt build (subprocess), classify, publish
+  state.py                  DuckDB state file: S3 with ETag-conditional upload, or local
+  sinks.py                  run report + run_results.json (S3 or a local folder)
+  config.py                 transform.yml (state keys, feed -> dbt source)
+  cli.py / lambda_handler.py
 src/claims_etl/notifications/
   notifier.py               notify_quarantine: create issue or comment, record result
   content.py                title/body/comment + sanitizing (no tracker dependency)
@@ -437,8 +504,8 @@ src/claims_etl/notifications/
   config.py                 notifications.yml (labels, title template, next steps)
   settings.py               get_setting(): env locally, SSM in Lambda
   cli.py / lambda_handler.py
-scripts/build_lambda.py     Lambda deployment package (shared by both functions)
-infra/terraform/            main.tf (ingestion), notifier.tf, S3 triggers, IAM, logs, SSM
+scripts/build_lambda.py     Lambda packages: lambda.zip (ingest + notify), --transform
+infra/terraform/            main.tf (ingestion), notifier.tf, transform.tf, triggers, IAM, logs
 tests/                      pytest for ingestion + notifier; test_dbt_intermediate.py (dbt end to end)
 dbt/
   dbt_project.yml, profiles.yml   DuckDB target, S3 via credential chain (no secrets)

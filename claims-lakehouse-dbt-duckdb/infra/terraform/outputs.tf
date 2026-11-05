@@ -29,3 +29,19 @@ output "notifier_log_group" {
 output "notifier_trigger" {
   value = "s3://${var.landing_bucket}/quarantine/**/*.error.json (ObjectCreated)"
 }
+
+output "transform_function_name" {
+  value = aws_lambda_function.transform.function_name
+}
+
+output "transform_log_group" {
+  value = aws_cloudwatch_log_group.transform.name
+}
+
+output "transform_queue_url" {
+  value = aws_sqs_queue.transform.url
+}
+
+output "transform_dlq_url" {
+  value = aws_sqs_queue.transform_dlq.url
+}

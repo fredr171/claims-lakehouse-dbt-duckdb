@@ -54,7 +54,8 @@ Two feeds, each with its own landing prefix (`landing_prefixes` in config/ingest
   each landing prefix (cms/cclf/*.csv, humana/ma/*.csv); the CLI runs the same
   process_file locally.
 - Infra changes go through Terraform (infra/terraform), never the console. Rebuild
-  the package with `python scripts/build_lambda.py` before `terraform apply`.
+  the packages with `python scripts/build_lambda.py` (and `--transform`) before
+  `terraform apply`.
 - Lambda Python version (3.13), the pandas layer ARN, and LAMBDA_PYTHON_VERSION in
   scripts/build_lambda.py must stay in sync.
 - `landing_prefixes` in config/ingestion.yml and the Terraform `landing_prefixes`
@@ -73,6 +74,8 @@ landing: <feed>/<file_type>/<file_name>.csv            e.g. cms/cclf/claims_head
 raw:     <feed>/<file_type>/delivery_month=<yyyy-mm>/part-0.parquet
          _manifests/<sha256>.json   (one record per processed file; written only by ingestion)
          _tickets/<sha256>.json     (quarantine ticket record; written only by the notifier)
+         _transform/state/claims_lakehouse.duckdb (+ .previous.duckdb)  (transform runner only)
+         _transform/runs/<run_id>/report.json, run_results.json         (transform runner only)
 landing archive/quarantine mirror the original key:
          archive/<feed>/<file_type>/<file_name>.csv
          quarantine/<feed>/<file_type>/<file_name>.csv
@@ -296,6 +299,39 @@ ticket result recorded.
 - Correct downstream results are defined by `../answer_key/` (net paid by service and
   load month, final members, claim actions, member changes).
 
+## Event-driven transforms (raw -> staging + intermediate)
+
+- Ingestion publishes `FileIngested` (claims_etl/events.py) to the default EventBridge bus
+  for every file in raw (success AND skipped_duplicate, `redelivered: true`), after the
+  manifest and before the archive move; a failed publish = `error`, file stays in landing.
+  `publish_events: true` in ingestion.yml.
+- EventBridge rule -> SQS FIFO `claims-etl-transform.fifo` (ONE message group: one build at
+  a time) -> Lambda `claims-etl-transform` (infra/terraform/transform.tf), batch up to 10;
+  DLQ `claims-etl-transform-dlq.fifo` after 3 receives.
+- The runner (claims_etl/transform/runner.py) builds the WHOLE FEED (`source:<cclf|humana>+`),
+  never one file type: a stop in CCLF5 must still block claim families when CCLF1 arrives.
+  `delivery_months` = the events' months (WARN scoping only). dbt runs as a SUBPROCESS
+  (process exit closes and checkpoints DuckDB; no dbt state in a warm Lambda).
+- Outcomes: passed / warned / stopped -> publish the state, write the report, delete the
+  messages (final answers). error (model/test could not run, dbt crash, state conflict) ->
+  keep the old state, write the report, raise (retry, then DLQ).
+- State: `s3://fredr-claims-raw-2026/_transform/state/claims_lakehouse.duckdb`, single
+  writer, upload conditional on the downloaded ETag (If-None-Match on the first run);
+  previous version copied to `claims_lakehouse.previous.duckdb`. Run artifacts:
+  `_transform/runs/<run_id>/report.json` + `run_results.json`. Reports carry test names and
+  failure COUNTS only, never row values (the step-3 notifier posts them to the public repo).
+- CLI `claims-transform` (--feed/--all, --months, --db for a local state file, --raw-root for
+  local raw). Exit 0 passed/warned, 2 stopped, 1 error.
+- Package: `python scripts/build_lambda.py --transform` -> build/transform_lambda.zip
+  (dbt-core/dbt-duckdb/duckdb pinned to the locally installed, tested versions; dbt project
+  bundled as `dbt_project/` because dbt-core's Python package is `dbt/`; DuckDB httpfs + aws
+  extensions bundled, autoinstall off; empty placeholder for dbt-core-experimental-parser;
+  Babel locales trimmed to English). Must stay under 250 MB unzipped (the build fails
+  otherwise); deployed via the Terraform-managed `fredr-claims-artifacts-2026` bucket.
+  Rebuild it before `terraform apply` whenever dbt/, config/ or src/ change.
+- profiles.yml target `lambda` = the Lambda's settings (CLAIMS_DUCKDB_EXTENSION_DIR); `dev`
+  stays the local default.
+
 ## Tech stack
 
 - Python 3 (3.13 in Lambda), standard library csv, pyarrow, boto3, requests
@@ -358,13 +394,21 @@ ticket result recorded.
       refresh incl. Humana re-sends; new tests shown to fail on broken data
 - [x] 2026-11-04: generator refactored onto a shared member registry (FFS <-> MA
       switchers; CCLF8 FFS_END / FFS_RETURN updates set BENE_RNG_END_DT / BGN_DT).
-      Seed 42 output changed: the 2023-01..03 files already in S3 are STALE and must
-      be re-landed (user action). A Humana MA generator was added at the repo root
+      Seed 42 output changed; the stale S3 files were deleted and re-landed the same day
+      (verified 2026-11-05: all 18 raw manifests for 2023-01..03 match a fresh seed-42
+      regeneration). A Humana MA generator was added at the repo root
       (`../output/humana/`); it is not ingested yet (no file type configs)
 - [x] 2026-11-04: dbt project + staging: 4 stg_cclf__* views over raw S3, 48 tests
       passing (row counts match raw); tests verified to fail on broken data
 - [x] 2026-11-04: intermediate incremental models (beneficiary SCD2, claim families),
       affected-key strategy; offline end-to-end test matches ../answer_key/ for all 36
       months and incremental (batches + old-month re-sends) == full refresh
+- [x] 2026-11-05: test severities (STOP vs WARN) + gating tests (PR #5)
+- [x] 2026-11-05: event-driven transform runner (FileIngested -> EventBridge -> SQS FIFO ->
+      claims-etl-transform) deployed (terraform apply: 17 added, 2 changed); first build via
+      `claims-transform --all` passed (143 tests, 10 models); S3 state matches an offline
+      build of 2023-01..03 row for row
+- [ ] First live Lambda run (land 2023-04 and check the transform logs + report)
+- [ ] Transform reports -> GitHub issues (notifier extension) + DLQ alarm -> SNS email
 - [ ] Marts to s3://fredr-claims-marts-2026 (external materialization)
 - [ ] Move Terraform state to an S3 backend before CI

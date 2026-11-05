@@ -20,7 +20,7 @@ provider "aws" {
     tags = {
       Project   = "claims-etl"
       ManagedBy = "terraform"
-      # Component is tagged per resource (ingestion / notifier).
+      # Component is tagged per resource (ingestion / notifier / transform).
     }
   }
 }

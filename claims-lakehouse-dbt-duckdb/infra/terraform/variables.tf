@@ -83,3 +83,35 @@ variable "log_retention_days" {
   type        = number
   default     = 30
 }
+
+# --- Transform runner (transform.tf) ---------------------------------------------------
+
+variable "artifacts_bucket" {
+  description = "Bucket (managed here) holding deployment packages too big for direct upload."
+  type        = string
+  default     = "fredr-claims-artifacts-2026"
+}
+
+variable "transform_zip_path" {
+  description = "Transform package built by scripts/build_lambda.py --transform."
+  type        = string
+  default     = "../../build/transform_lambda.zip"
+}
+
+variable "transform_memory_mb" {
+  description = "Transform Lambda memory (MB); DuckDB uses up to 80% of it."
+  type        = number
+  default     = 2048
+}
+
+variable "transform_timeout_seconds" {
+  description = "Transform Lambda timeout. A two-feed build takes ~15 s locally."
+  type        = number
+  default     = 600
+}
+
+variable "transform_max_receive_count" {
+  description = "Receives of a failing batch before it moves to the dead-letter queue."
+  type        = number
+  default     = 3
+}

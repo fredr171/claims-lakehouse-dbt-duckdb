@@ -1,0 +1,19 @@
+# Transform runner (claims_etl/transform): FileIngested events -> dbt build of the
+# staging + intermediate models downstream of each delivered file type.
+# Buckets, the region and each feed's file types come from ingestion.yml and
+# config/file_types/ (one source of truth).
+
+# The DuckDB file that holds staging + intermediate. One writer at a time: the
+# transform queue is FIFO with a single message group, and the upload is
+# conditional on the ETag that was downloaded.
+state_key: _transform/state/claims_lakehouse.duckdb           # in the raw bucket
+backup_key: _transform/state/claims_lakehouse.previous.duckdb  # copy of the state before each upload
+runs_prefix: _transform/runs/                                  # <run_id>/report.json + run_results.json
+
+# Landing feed prefix -> dbt source name (dbt/models/staging/<source>/).
+feeds:
+  cms/cclf/: cclf
+  humana/ma/: humana
+
+# profiles.yml target. The Lambda overrides it (CLAIMS_DBT_TARGET=lambda).
+dbt_target: dev
