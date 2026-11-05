@@ -143,6 +143,14 @@ class GitHubClient:
         )
         return response.json()["html_url"]
 
+    def close_ticket(self, ticket: Ticket) -> None:
+        """Close an issue as completed (the problem it tracks is resolved)."""
+        self._request(
+            "PATCH",
+            f"{API_ROOT}/repos/{self.repo}/issues/{ticket.number}",
+            json={"state": "closed", "state_reason": "completed"},
+        )
+
     # --- internals -------------------------------------------------------------------
 
     def _list_label_names(self) -> Iterator[str]:

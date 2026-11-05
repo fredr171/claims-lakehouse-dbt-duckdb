@@ -456,10 +456,47 @@ Exit codes: 0 = passed or warned, 2 = stopped, 1 = error.
 | Rule | `source = claims-etl.ingestion`, `detail-type = FileIngested` → queue, message group `transform`; retries for 24 h, then the standard queue `claims-etl-transform-undelivered` (14 days) |
 | IAM | Read raw feed prefixes; read/write `_transform/*`; consume its queue; own log group. Ingestion gains `events:PutEvents` on the default bus, limited to its own source |
 
+## Pipeline alerts (GitHub issues, no email)
+
+Every failure ends up as a GitHub issue in this repo, through the same notifier Lambda,
+token and sanitizing as quarantine issues
+([`notifications/alerts.py`](src/claims_etl/notifications/alerts.py)). GitHub notifies
+the repo owner of new issues and comments, so a failure reaches you within a minute or two.
+
+```
+transform run report.json ──S3 trigger──► claims-etl-notify ──► issue / comment / close
+CloudWatch alarm (ALARM/OK) ──► SNS claims-etl-alerts ──► claims-etl-notify ──► issue / comment / close
+```
+
+- **Transform runs.** A `stopped` or `error` run opens an issue labeled `pipeline-alert`,
+  `transform` and `stopped` or `error`. The same problem in a later run (same feeds, same
+  failing tests or nodes) adds a comment instead. A later `passed` or `warned` run that
+  built those feeds comments and closes it, so an open transform issue always means
+  "still broken".
+- **Alarms** cover failures that leave no report:
+
+  | Alarm | Fires when |
+  |---|---|
+  | `claims-etl-transform-dlq-not-empty` | a transform batch ran out of retries |
+  | `claims-etl-events-delivery-failed` | EventBridge failed to deliver a `FileIngested` event (the 2023-04 bug) |
+  | `claims-etl-events-undelivered` | EventBridge gave up after 24 h of retries |
+  | `claims-etl-ingest-errors` | ingestion raised (bad data is quarantined instead) |
+  | `claims-etl-transform-killed` | the transform Lambda timed out or ran out of memory (log metric filter) |
+
+  ALARM opens the alarm's issue (or comments on it); OK comments and closes it.
+- **Public-repo safe.** Issues carry run IDs, outcomes, feeds, months, file names, test
+  names and failure counts. Everything is whitelisted: names must look like identifiers,
+  the build exception keeps only its class name, and dbt error messages are never posted
+  (a SQL error can quote a data value). The issue links to the private report instead.
+- **Idempotent.** Each handled event leaves a record under `_tickets/alerts/`, so a
+  re-delivered S3 or SNS event makes no API calls.
+- **Not covered:** the notifier itself (its alarm would be delivered by the failing
+  function) and the GitHub token, which expires 2027-02-02. Both are in CLAUDE.md.
+
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 195 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest      # 230 tests; no AWS or GitHub access (moto + responses)
 .venv/Scripts/python -m pytest -m "not dbt"   # skip the ~4 min dbt end-to-end tests
 .venv/Scripts/python -m ruff check src tests
 ```
@@ -498,6 +535,8 @@ src/claims_etl/ingestion/
   log.py / utils.py          JSON-lines logging, checksum and time helpers (shared)
   cli.py / lambda_handler.py
 src/claims_etl/s3_events.py S3 event parsing shared by both handlers (no pyarrow)
+src/claims_etl/notifications/alerts.py, alert_config.py
+                            transform reports + CloudWatch alarms -> GitHub issues
 src/claims_etl/events.py    FileIngested event (ingestion -> EventBridge -> transform)
 src/claims_etl/transform/
   runner.py                 run_transform: select feeds, dbt build (subprocess), classify, publish
