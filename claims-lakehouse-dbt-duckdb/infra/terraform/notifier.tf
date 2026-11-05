@@ -48,6 +48,14 @@ data "aws_iam_policy_document" "notify" {
     resources = ["${local.landing_arn}/quarantine/*"]
   }
 
+  # Transform run reports (alerts.tf triggers the notifier on report.json).
+  statement {
+    sid       = "ReadTransformRunReports"
+    actions   = ["s3:GetObject"]
+    resources = ["${local.raw_arn}/_transform/runs/*"]
+  }
+
+  # _tickets/<sha256>.json (quarantine) and _tickets/alerts/<event>.json (alerts).
   statement {
     sid       = "ReadWriteTicketRecords"
     actions   = ["s3:GetObject", "s3:PutObject"]

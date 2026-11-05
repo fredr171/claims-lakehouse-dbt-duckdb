@@ -58,3 +58,52 @@ next_steps:
   default: >-
     Review the .error.json report linked above and the check in
     src/claims_etl/ingestion/checks.py.
+
+# --- Pipeline alerts: transform runs and CloudWatch alarms -> GitHub issues ------------
+# claims_etl/notifications/alerts.py. The same repo, client and sanitizing as quarantine.
+# One OPEN issue per problem, found by the body line ``Alert key: `<key>` `` (Issues list
+# endpoint filtered by match_label, like quarantine). A repeat adds a comment; recovery
+# (a passed/warned run covering the feeds, or the alarm back to OK) comments and closes.
+alerts:
+  match_label: pipeline-alert
+  record_prefix: _tickets/alerts/   # raw bucket; one record per notified event (idempotency)
+  report_suffix: /report.json       # under transform.yml runs_prefix
+  labels:
+    pipeline-alert: {color: b60205, description: "claims-etl pipeline failure"}
+    transform: {color: 5319e7, description: "Transform run (dbt build) failed or stopped"}
+    stopped: {color: fbca04, description: "A STOP test blocked the intermediate models"}
+    error: {color: d93f0b, description: "The build could not run"}
+    alarm: {color: e99695, description: "CloudWatch alarm"}
+  next_steps:
+    stopped: >-
+      A STOP test failed, so dbt skipped the intermediate models below it; those feeds
+      stay pending (their raw checksums are not in intermediate yet). Find the failing
+      rows locally from run_results.json, then fix the delivery: re-send the corrected
+      file. Every later build re-checks all months, so this issue closes itself on the
+      first passed or warned run for these feeds.
+    error: >-
+      The build could not run (dbt crash, SQL error, S3 trouble or a state conflict). The
+      old state was kept. SQS retries after 2, 5 and 10 minutes, then moves the batch to
+      claims-etl-transform-dlq.fifo. Check /aws/lambda/claims-etl-transform for this run
+      ID, fix the cause, and redrive the DLQ.
+    alarms:
+      claims-etl-transform-dlq-not-empty: >-
+        A transform batch ran out of retries. See the open "error" issue for its runs, fix
+        the cause, then redrive claims-etl-transform-dlq.fifo to claims-etl-transform.fifo.
+      claims-etl-events-undelivered: >-
+        EventBridge could not deliver FileIngested events to the transform queue for 24 h.
+        Check the queue and its policy, then re-publish the events in
+        claims-etl-transform-undelivered (the raw files are fine).
+      claims-etl-events-delivery-failed: >-
+        EventBridge failed to deliver a FileIngested event (it retries for 24 h). Check
+        the queue policy and that the FIFO queue keeps content-based deduplication.
+      claims-etl-ingest-errors: >-
+        Ingestion raised (S3, network or publish trouble, not bad data: bad data is
+        quarantined). The file stays in landing; check /aws/lambda/claims-etl-ingest and
+        re-run with `claims-etl --scan`.
+      claims-etl-transform-killed: >-
+        The transform Lambda was killed (timeout or out of memory) before it could write a
+        report. Check /aws/lambda/claims-etl-transform; raise memory or the timeout in
+        Terraform if the build has outgrown them.
+      default: >-
+        Check the alarm in the CloudWatch console and the related log group.

@@ -342,6 +342,27 @@ ticket result recorded.
 - profiles.yml target `lambda` = the Lambda's settings (CLAIMS_DUCKDB_EXTENSION_DIR); `dev`
   stays the local default.
 
+## Pipeline alerts (transform reports + CloudWatch alarms -> GitHub issues)
+
+- No email: every failure becomes a GitHub issue via the existing `claims-etl-notify`
+  Lambda (claims_etl/notifications/alerts.py, config `alerts:` in notifications.yml).
+- Triggers (infra/terraform/alerts.tf): raw bucket `_transform/runs/*/report.json` (S3; the
+  raw bucket's notification config lives ONLY in alerts.tf) and SNS `claims-etl-alerts`
+  (CloudWatch alarms, alarm_actions AND ok_actions).
+- Transform: stopped/error -> issue (labels pipeline-alert, transform, stopped|error), one
+  OPEN issue per alert key ``Alert key: `transform-<outcome>:<feeds>:<digest of failing
+  tests/nodes>` `` (Issues list endpoint, never search); repeat -> comment; a passed/warned
+  run whose feeds include the key's feeds -> comment + close.
+- Alarms: ALARM -> issue/comment (key `alarm:<name>`), OK -> comment + close. Alarm names
+  must match alerts.next_steps.alarms keys (5 alarms: transform DLQ, events undelivered,
+  events delivery failed, ingest errors, transform killed).
+- PUBLIC repo: whitelist only (identifiers, file names, months, counts); never post dbt
+  error messages or exception text (a SQL error can quote row values): exception class only.
+- Idempotency: one record per handled event in `_tickets/alerts/<event_id>.json`
+  (run-<run_id> / alarm-<digest>); a no-op passed run writes none.
+- Not alarmed: the notifier itself (circular). If GitHub or the token fails, nothing
+  reaches the user: renew the GitHub token before 2027-02-02 (SSM /claims-etl/GITHUB_TOKEN).
+
 ## Tech stack
 
 - Python 3 (3.13 in Lambda), standard library csv, pyarrow, boto3, requests
@@ -423,9 +444,13 @@ ticket result recorded.
       dbt's multiprocessing locks crash on Lambda (no /dev/shm; dbt_cli). The retry
       passed (143 tests, 10 models, 19 s); S3 state matches the local build row for row,
       which matches both answer keys through 2023-04
-- [ ] Transform retry backoff (2/5/10 min instead of the 1-hour visibility timeout)
-- [ ] Transform reports -> GitHub issues (notifier extension) + CloudWatch alarms (DLQs,
-      EventBridge FailedInvocations, ingest errors) -> SNS -> notifier -> GitHub issues;
-      no email (decided 2026-11-05)
+- [x] 2026-11-05: transform retry backoff (2/5/10 min instead of the 1-hour visibility
+      timeout) + dbt locks fix for ThreadPool (PR #8), deployed
+- [x] 2026-11-05: transform reports -> GitHub issues (notifier extension) + 5 CloudWatch
+      alarms (transform DLQ, events delivery failed / undelivered, ingest errors, transform
+      killed) -> SNS claims-etl-alerts -> notifier -> GitHub issues; no email (PR #9).
+      Deployed (terraform apply: 12 added, 5 changed; no drift after). Live test: forced
+      claims-etl-ingest-errors to ALARM -> issue #10 opened, CloudWatch returned it to OK ->
+      #10 commented + closed. A real stopped/error transform report has not happened yet
 - [ ] Marts to s3://fredr-claims-marts-2026 (external materialization)
 - [ ] Move Terraform state to an S3 backend before CI
