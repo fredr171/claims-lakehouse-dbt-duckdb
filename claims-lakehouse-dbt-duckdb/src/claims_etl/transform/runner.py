@@ -152,7 +152,7 @@ def run_transform(
         try:
             state.fetch(db)
             run_results = _dbt_build(report, db, work, extra_vars or {})
-            _classify(report, run_results)
+            _classify(report, run_results, _read_manifest(work))
             if report.outcome is not Outcome.ERROR:
                 state.publish(db)
                 report.published = True
@@ -220,8 +220,40 @@ def _dbt_build(
     return json.loads(results_file.read_text(encoding="utf-8"))
 
 
-def _classify(report: TransformReport, run_results: dict[str, Any]) -> None:
-    """Fill counts/stops/warns/errors/skipped and the outcome from run_results.json."""
+def _read_manifest(work: Path) -> dict[str, Any]:
+    """dbt's manifest.json from this build ({} if dbt did not write one)."""
+    path = work / "target" / "manifest.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def node_feeds(manifest: dict[str, Any], unique_id: str) -> list[str]:
+    """The dbt sources (= feeds: cclf, humana) a node reads, directly or through models.
+
+    Walks the manifest's parent_map up to `source.<project>.<source>.<table>` nodes. A run
+    can build several feeds while a failing test belongs to one: alerts key their issue
+    by THESE feeds, so a later run of just that feed can resolve it.
+    """
+    parents = manifest.get("parent_map") or {}
+    feeds, seen, todo = set(), set(), [unique_id]
+    while todo:
+        node = todo.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        if node.startswith("source."):
+            feeds.add(node.split(".")[2])
+        todo.extend(parents.get(node, []))
+    return sorted(feeds)
+
+
+def _classify(
+    report: TransformReport, run_results: dict[str, Any], manifest: dict[str, Any] | None = None
+) -> None:
+    """Fill counts/stops/warns/errors/skipped and the outcome from run_results.json.
+
+    Each stop, warn and error carries `feeds`: the dbt sources it reads (node_feeds).
+    """
+    manifest = manifest or {}
     results = run_results.get("results", [])
     report.counts = dict(sorted(Counter(r["status"] for r in results).items()))
     for r in results:
@@ -230,9 +262,12 @@ def _classify(report: TransformReport, run_results: dict[str, Any]) -> None:
             report.skipped.append(uid)
         elif status == "error":
             message = (r.get("message") or "")[:_MAX_MESSAGE_CHARS]
-            report.errors.append({"unique_id": uid, "message": message})
+            report.errors.append(
+                {"unique_id": uid, "message": message, "feeds": node_feeds(manifest, uid)}
+            )
         elif status in ("fail", "warn") and uid.startswith("test."):
-            entry = {"unique_id": uid, "name": uid.split(".")[2], "failures": r.get("failures")}
+            entry = {"unique_id": uid, "name": uid.split(".")[2], "failures": r.get("failures"),
+                     "feeds": node_feeds(manifest, uid)}  # fmt: skip
             (report.stops if status == "fail" else report.warns).append(entry)
     report.skipped.sort()
     if report.errors:

@@ -221,6 +221,44 @@ def test_good_run_for_one_feed_leaves_a_two_feed_issue_open(s3, acfg, client, ap
     assert s3.get_json(RAW_BUCKET, f"{acfg.record_prefix}run-{_report()['run_id']}.json") is None
 
 
+def test_issue_is_keyed_by_the_failing_tests_feed_and_a_one_feed_run_closes_it(
+    s3, acfg, client, api
+) -> None:
+    """Issue #12: a run built cclf+humana and stopped on a Humana-only test; the fix run
+    built only Humana. The issue must name Humana alone, so that run resolves it."""
+    stop = {"unique_id": "test.claims_lakehouse.not_null_stg_humana__x_mbi.1",
+            "name": "not_null_stg_humana__x_mbi", "failures": 1, "feeds": ["humana"]}  # fmt: skip
+    key = _put_report(s3, _report(stops=[stop]))
+    _mock_create(api)
+    notify_transform_report(key, config=acfg, store=s3, client=client)
+    [issue] = _posted(api, ISSUES)
+    alert_key = TransformRun.from_report(_report(stops=[stop]), "s3://x").alert_key
+    assert alert_key.startswith("transform-stopped:humana:")
+    assert issue["title"] == "[Transform stopped] humana: not_null_stg_humana__x_mbi"
+    assert "| Feeds built | `cclf`, `humana` |" in issue["body"]
+    assert "| Problem in | `humana` |" in issue["body"]
+
+    api.reset()
+    fix = _put_report(s3, _report(run_id="20261106T193914Z-5ade588b", outcome="passed",
+                                  selectors=["source:humana+"]))  # fmt: skip
+    api.get(ISSUES, json=[_issue(12, alert_key)])
+    api.post(f"{ISSUES}/12/comments", status=201, json={"html_url": "https://gh/12#c"})
+    api.patch(f"{ISSUES}/12", json={})
+    result = notify_transform_report(fix, config=acfg, store=s3, client=client)
+    assert (result.outcome, result.ticket_numbers) == (AlertOutcome.CLOSED, (12,))
+
+
+def test_problem_feeds_fall_back_to_the_built_feeds() -> None:
+    # Reports written before the runner recorded node feeds, and unknown feed names.
+    old = TransformRun.from_report(_report(), "s3://x")
+    assert old.problem_feeds == ("cclf", "humana")
+    stray = {"name": STOP_TEST, "failures": 1, "feeds": ["aetna"]}  # not a feed the run built
+    assert TransformRun.from_report(_report(stops=[stray]), "s3://x").problem_feeds == (
+        "cclf", "humana")  # fmt: skip
+    error = _report(outcome="error", errors=[{"unique_id": MODEL_UID, "feeds": ["cclf"]}])
+    assert TransformRun.from_report(error, "s3://x").alert_key.startswith("transform-error:cclf:")
+
+
 def test_feeds_of_key() -> None:
     assert feeds_of_key("transform-stopped:cclf+humana:abc") == {"cclf", "humana"}
     assert feeds_of_key("alarm:claims-etl-ingest-errors") is None

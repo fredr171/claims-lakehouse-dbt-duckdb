@@ -371,7 +371,11 @@ ticket result recorded.
 - Transform: stopped/error -> issue (labels pipeline-alert, transform, stopped|error), one
   OPEN issue per alert key ``Alert key: `transform-<outcome>:<feeds>:<digest of failing
   tests/nodes>` `` (Issues list endpoint, never search); repeat -> comment; a passed/warned
-  run whose feeds include the key's feeds -> comment + close.
+  run whose feeds include the key's feeds -> comment + close. <feeds> = the feeds the
+  FAILING tests/nodes read (the runner records `feeds` per stop/warn/error by walking dbt's
+  manifest parent_map to its sources), not the feeds the run built: a cclf+humana run that
+  stops on a Humana test opens a `humana` issue, closed by the next good Humana run
+  (2026-11-06: issue #12 stayed open because the key used the run's feeds).
 - Alarms: ALARM -> issue/comment (key `alarm:<name>`), OK -> comment + close. Alarm names
   must match alerts.next_steps.alarms keys (5 alarms: transform DLQ, events undelivered,
   events delivery failed, ingest errors, transform killed).
@@ -471,8 +475,11 @@ ticket result recorded.
       Deployed (terraform apply: 12 added, 5 changed; no drift after). Live test: forced
       claims-etl-ingest-errors to ALARM -> issue #10 opened, CloudWatch returned it to OK ->
       #10 commented + closed. A real stopped/error transform report has not happened yet
-- [ ] 2026-11-05: immutable bronze (checksum-keyed raw/archive/quarantine, stg_<feed>__deliveries,
-      versioning + lifecycle on landing/raw, migration script) built on branch
-      immutable-bronze; not deployed, S3 objects not migrated yet
+- [x] 2026-11-05: immutable bronze (checksum-keyed raw/archive/quarantine, stg_<feed>__deliveries,
+      2 STOP tests, versioning + lifecycle on landing/raw; PR #13). Deployed (terraform apply:
+      4 added, 4 changed; no drift after) and the 48 existing deliveries migrated (96 moves,
+      0 problems; 48/48 manifests updated; re-run finds nothing). A fresh build over the
+      migrated raw equals the Lambda state row for row and matches the CMS answer key through
+      2023-08; Humana still stops on the bad HUM_ELIG_202308 (issue #12) until it is re-sent
 - [ ] Marts to s3://fredr-claims-marts-2026 (external materialization)
 - [ ] Move Terraform state to an S3 backend before CI

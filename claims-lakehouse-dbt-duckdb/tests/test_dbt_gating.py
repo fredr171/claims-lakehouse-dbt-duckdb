@@ -348,6 +348,7 @@ def test_runner_keeps_feed_blocked_across_file_types(
         "unique_combination_of_columns_stg_cclf__part_b_physician_lines_claim_id__line_number"
     ]
     assert "model.claims_lakehouse.int_cclf__claim_families" in report.skipped
+    assert report.stops[0]["feeds"] == ["cclf"]  # from dbt's real manifest (issue keys)
     assert _families_from(lake["db"], "int_cclf__claim_families", _checksum(lines)) == 0
 
     # Then a clean CCLF1, which also feeds the claim families. Selecting only
