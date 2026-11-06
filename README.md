@@ -1,380 +1,595 @@
-# Synthetic payer test-file generators (CCLF + Humana MA)
+# Claims Lakehouse: dbt + DuckDB on S3
 
-Two seeded, fully synthetic generators that feed the same lakehouse:
+An end-to-end ETL pipeline for **synthetic** Medicare claims from two feeds, both produced by
+the seeded generators in a separate repo,
+[synthetic-payer-files](https://github.com/fredr171/synthetic-payer-files):
 
-- **`generate_cclf.py`**: CMS **CCLF** (Claim and Claim Line Feed) monthly deliveries
-  for Medicare fee-for-service (FFS) beneficiaries.
-- **`generate_humana.py`**: Humana-style **Medicare Advantage** (MA) eligibility and
-  medical-claims extracts.
+- **CMS CCLF** (Claim and Claim Line Feed, Medicare fee-for-service), from `generate-cclf`.
+- **Humana Medicare Advantage** eligibility and medical claims, from `generate-humana`.
+  Its field names are invented: Humana's real layouts are proprietary.
 
-Both draw their people from one shared member registry, so beneficiaries who switch
-between FFS and MA keep the same MBI, name, DOB and address in both feeds, with no
-overlapping coverage. Use them to practice incremental ETL: change capture,
-late-arriving facts, claim reversals and adjustments, referential integrity, and
-cross-payer member matching.
+The files landed in S3 are that repo's committed seed-42 output (`output/cms/`,
+`output/humana/`). This repo's dev extra pins a release tag (`v1.0.0`), so the end-to-end
+dbt tests generate exactly the data their hardcoded counts and answer keys describe.
 
-Nothing here is real: names, addresses, MBIs, HICNs, member IDs, NPIs, CCNs, TINs,
-contract IDs and plan names are all generated. Any match to a real person, provider,
-facility or plan is coincidental.
+No real claims, PHI, or PII are used anywhere.
 
-| File | Content | Grain |
+```
+landing (S3, .csv)  ──►  raw / bronze (S3, Parquet)  ──►  staging + intermediate / silver (DuckDB via dbt)  ──►  marts / gold (S3, Parquet)
+   └── ingestion (Python, Lambda) ──┘                        └──────── dbt-duckdb (staging + intermediate built; next: marts) ────────┘
+                                  └── FileIngested event ──► transform Lambda (dbt build per feed)
+```
+
+| Layer | Location | Format |
 |---|---|---|
-| CCLF8 | Beneficiary demographics | one row per beneficiary per delivery in which it is new or changed |
-| CCLF1 | Part A claim header | one row per claim version |
-| CCLF4 | Part A diagnosis codes | 1–6 rows per CCLF1 claim version |
-| CCLF5 | Part B physician claim lines | 1–4 lines per claim version |
-| HUM_ELIG | MA member eligibility | one row per member per delivery in which it is new, changed or terminated |
-| HUM_MEDCLM | MA medical claims (UB-04 and CMS-1500) | one row per claim line per claim version |
+| landing | `s3://fredr-claims-landing-2026` | `.csv` as delivered |
+| raw (bronze) | `s3://fredr-claims-raw-2026` | Parquet, all source columns as string |
+| staging/intermediate (silver) | DuckDB (dbt models) | tables / views |
+| marts (gold) | `s3://fredr-claims-marts-2026` | Parquet |
 
-## Repository layout
+All buckets are in `us-east-2` with Block Public Access and SSE-S3 encryption.
+
+## Source files
+
+One CSV per file type per month, 2023-01 to 2025-12: 36 months × 4 CCLF files (144) plus
+36 months × 2 Humana files (72). Both feeds share the same format: comma-delimited, unquoted,
+UTF-8 (ASCII in practice), LF line endings, empty string = missing.
+
+Each feed has its own landing prefix, and every file type belongs to exactly one feed.
+
+**CMS CCLF** (landing prefix `cms/cclf/`)
+
+| File | `file_type` | Content | Columns | Key columns (never empty) |
+|---|---|---|---|---|
+| `CCLF1_YYYYMM.csv` | `claims_header` | Part A claim header, one row per claim version | 30 | `CUR_CLM_UNIQ_ID`, `BENE_MBI_ID` |
+| `CCLF4_YYYYMM.csv` | `claims_diagnosis` | Part A diagnosis codes, 1–6 per claim | 12 | `CUR_CLM_UNIQ_ID`, `BENE_MBI_ID`, `CLM_VAL_SQNC_NUM` |
+| `CCLF5_YYYYMM.csv` | `part_b_physician_lines` | Part B physician claim lines | 33 | `CUR_CLM_UNIQ_ID`, `CLM_LINE_NUM`, `BENE_MBI_ID` |
+| `CCLF8_YYYYMM.csv` | `beneficiary_demographics` | Beneficiaries that are new or changed that month | 26 | `BENE_MBI_ID` |
+
+**Humana Medicare Advantage** (landing prefix `humana/ma/`)
+
+| File | `file_type` | Content | Columns | Key columns (never empty) |
+|---|---|---|---|---|
+| `HUM_ELIG_YYYYMM.csv` | `member_eligibility` | Members that are new, changed or terminated that month (full rows) | 28 | `MEMBER_ID` |
+| `HUM_MEDCLM_YYYYMM.csv` | `medical_claim_lines` | Claim lines, institutional and professional in one file; a reversal reuses `CLAIM_ID` with `CLAIM_FREQ_CD 8` | 56 | `CLAIM_ID`, `CLAIM_LINE_NUM`, `CLAIM_FREQ_CD`, `MEMBER_ID` |
+
+`MBI` (the Medicare ID that links a member who switches between fee-for-service and Medicare
+Advantage) is not an ingestion key. Missing MBIs are a dbt staging test, not a reason to
+quarantine a whole file.
+
+Expected columns in `config/file_types/*.yml` were copied from the delivered headers, which are
+identical in all 36 months of each feed.
+
+## Ingestion: landing → raw
+
+`process_file(s3_key)` in [`src/claims_etl/ingestion/pipeline.py`](src/claims_etl/ingestion/pipeline.py):
+
+1. **Download + SHA-256.** If `_manifests/<sha256>.json` already says `success`, the outcome is
+   `skipped_duplicate` and the file is archived.
+2. **Validate**: file and CSV checks run in order and stop at the first failure (below).
+   A failure moves the file to `quarantine/`, writes `<file>.error.json` next to it, and records
+   `quarantined`.
+3. **Write Parquet locally**: every source column as `string` (codes keep their leading zeros:
+   `PRVDR_FAC_FIPS_ST_CD = "05"`), plus `_source_uri`, `_source_file`, `_source_checksum`,
+   `_source_row_number`, `_ingested_at` (UTC), `_batch_id`.
+4. **Reconcile**: the Parquet footer row count must equal the CSV data row count before anything
+   is published.
+5. **Publish**: upload to the delivery's own key (delivery month + checksum: a re-run rewrites
+   only its own key, a re-send never touches the original), write the manifest, and move the
+   file to `archive/.../checksum=<sha256>/`.
+
+Data problems end in `quarantined`. Infrastructure problems (S3, network) end in `error`, and the
+file stays in landing so the next run retries it.
+
+### Validation checks
+
+| Level | Check | Fails when |
+|---|---|---|
+| file | `known_file_type` | key is not `<feed prefix><file type of that feed>/<file>` (e.g. a CCLF folder under `humana/ma/`) |
+| file | `file_name` | name does not match the type's regex (`CCLF1_YYYYMM.csv`, `HUM_ELIG_YYYYMM.csv`, month 01–12) |
+| file | `file_size` | 0 bytes or above the configured maximum |
+| CSV | `csv_utf8` / `csv_parseable` | not UTF-8, or malformed quoting |
+| CSV | `csv_header` | names or order differ from config (a UTF-8 BOM also fails here) |
+| CSV | `csv_field_counts` | any row's field count differs from the header's |
+| CSV | `csv_row_count` | no data rows |
+| CSV | `csv_key_columns` | an empty or whitespace-only key value |
+| post-write | `row_count_reconciliation` | Parquet rows ≠ CSV rows |
+
+Row-level data quality (code formats, dates, amounts, duplicate keys, referential integrity)
+belongs in dbt staging tests, not here.
+
+### S3 layout
+
+`<feed>` is `cms/cclf` or `humana/ma`:
 
 ```
-.                                    generators (this README)
-├── generate_cclf.py, validate_cclf.py, cclf_common.py
-├── generate_humana.py, validate_humana.py, humana_common.py
-├── validate_crosspayer.py           FFS <-> MA consistency checks
-├── member_registry.py               shared people, coverage spans, switchers, providers
-├── clinical_reference.py            shared diagnosis codes, DRGs, HCPCS fees
-├── output/YYYY-MM/CCLF*_YYYYMM.csv  CCLF files (seed 42)
-├── output/humana/YYYY-MM/HUM_*.csv  Humana files (seed 42)
-├── answer_key/                      CCLF expected results + crossover_members.csv
-├── answer_key/humana/               Humana expected results
-├── tests/                           test_cclf_generator.py, test_humana_generator.py
-└── claims-lakehouse-dbt-duckdb/     AWS lakehouse ETL (S3 + Lambda + Terraform +
-                                     dbt-duckdb); see its own README.md
+landing   <feed>/<file_type>/<file>.csv                     ← drop new files here
+          archive/<feed>/<file_type>/checksum=<sha256>/<file>.csv     ← processed
+          quarantine/<feed>/<file_type>/checksum=<sha256>/<file>.csv[.error.json]
+raw       <feed>/<file_type>/delivery_month=<yyyy-mm>/checksum=<sha256>/part-0.parquet
+          _manifests/<sha256>.json                          ← one per processed file, all feeds
+          _tickets/<sha256>.json
 ```
 
-Commands for the lakehouse project (pytest, ruff, `scripts/build_lambda.py`,
-`terraform`, the `claims-ingest` / `claims-notify` CLIs) run from inside
-`claims-lakehouse-dbt-duckdb/`. Its `.env` is found from the working directory.
+For example, `humana/ma/member_eligibility/HUM_ELIG_202301.csv` becomes
+`humana/ma/member_eligibility/delivery_month=2023-01/checksum=<sha256>/part-0.parquet` in raw.
 
-## Regenerate
+**Immutable bronze.** Nothing a payer delivers is ever overwritten or deleted. Raw partitions
+encode **delivery identity**: the month from the file name (never data content:
+`CCLF1_202301.csv` → `claims_header/delivery_month=2023-01`) plus the file's SHA-256. A
+corrected re-send of a file lands *next to* the original, and dbt decides which delivery is
+current (see `stg_<feed>__deliveries` below). So you can always answer "what did the payer
+send, and when", re-run a stopped build on exactly the data it saw, or roll back a bad
+correction. Versioning and a lifecycle rule on the landing and raw buckets
+([`storage.tf`](infra/terraform/storage.tf)) are the safety net for human mistakes: a
+deleted or overwritten object stays restorable for 90 days. Claims
+arrive late (service dates up to 12 months before the load month), and cancellations and
+adjustments in later months refer back to earlier originals, so claim-date logic and
+de-duplication across deliveries happen in dbt, never by splitting files at ingestion.
+
+### Adding a file type or a feed
+
+**A file type in an existing feed** only needs `config/file_types/<file_type>.yml`, with:
+
+- the feed's `landing_prefix`;
+- the naming regex (named groups);
+- the raw key template;
+- the expected columns, copied from the real header;
+- the key columns.
+
+**A new feed** (another payer) also needs its prefix added to `landing_prefixes` in
+`config/ingestion.yml` and to the Terraform variable `landing_prefixes`. That one list drives
+the S3 triggers, the IAM scoping and the CLI `--scan`, so the two must match. Then rebuild the
+package and `terraform apply`.
+
+The config is validated on load. For example:
+
+- feed prefixes may not overlap each other or `archive/` / `quarantine/`;
+- a template may only use groups the regex captures;
+- a raw key must stay inside its own `<feed>/<file_type>/` folder, because IAM grants raw writes
+  per feed.
+
+## Transformations: raw → staging (dbt + DuckDB)
+
+The dbt project in [`dbt/`](dbt/) reads raw Parquet straight from S3 (DuckDB `httpfs`, AWS
+credential chain; no copy step) and builds staging views in a local DuckDB file. Each feed has
+its own dbt source and staging folder (`models/staging/cclf/`, `models/staging/humana/`).
+
+| Model | Grain | Unique key |
+|---|---|---|
+| `staging.stg_cclf__deliveries` / `stg_humana__deliveries` (tables) | delivered file | `file_type`, `checksum` |
+| `staging.stg_cclf__claims_header` | claim version | `claim_id` |
+| `staging.stg_cclf__claims_diagnosis` | diagnosis per claim version | `claim_id`, `diagnosis_sequence_number` |
+| `staging.stg_cclf__part_b_physician_lines` | line per claim version | `claim_id`, `line_number` |
+| `staging.stg_cclf__beneficiary_demographics` | beneficiary per delivery | `beneficiary_mbi`, `delivery_month` |
+| `staging.stg_humana__member_eligibility` | member per delivery | `member_id`, `delivery_month` |
+| `staging.stg_humana__medical_claim_lines` | line per claim version | `claim_id`, `line_number`, `claim_frequency_code` |
+
+**Which delivery counts.** Raw keeps every delivery. `stg_<feed>__deliveries` lists them all,
+one row per delivered file, with `is_current` (the latest ingested delivery of each file name),
+`current_checksum` (on a superseded row, the delivery that replaced it) and
+`deliveries_of_file`. Every staging model reads only the rows of current deliveries
+([`macros/deliveries.sql`](dbt/macros/deliveries.sql)). A STOP test
+(`delivery_index_is_consistent`) fails the feed if a file sits under another file's checksum
+folder or two deliveries of one file tie for "current". Because raw never loses a delivery,
+another STOP (`raw_keeps_every_built_delivery`) fails the feed if a checksum that
+intermediate was built from is missing from raw entirely (a mistaken delete, a wrong glob):
+intermediate keeps its state instead of having those keys pruned.
+
+Apart from that, staging does only three things, the same way for both feeds:
+
+- renames delivered columns to readable names (`CUR_CLM_UNIQ_ID` → `claim_id`,
+  `SERVICE_FROM_DT` → `claim_start_date`; each column's description keeps the delivered name);
+- turns empty strings into `NULL`;
+- casts types.
+
+Shared concepts get the same name in both feeds (`beneficiary_mbi`, `claim_start_date`,
+`facility_ccn`, `drg_code`, …), which prepares the later combined layer. Dates become `DATE`, amounts `DECIMAL(18,2)`, counts `INTEGER`. Codes and
+identifiers stay text, because many carry leading zeros (`fips_county_code = '013'`) or
+non-numeric values (`dual_status_code = 'NA'`). Every delivery is kept. Picking current
+beneficiary rows and netting cancellations/adjustments is the next layer's job.
+
+Tests (`dbt build` runs them): keys unique and not null, code domains (`accepted_values`),
+and delivery rules:
+
+- **CMS:**
+  - every CCLF4 diagnosis belongs to a CCLF1 claim;
+  - claim load dates fall inside their delivery month;
+  - every claim's beneficiary arrived in a CCLF8 delivery no later than the claim.
+- **Humana:**
+  - processed dates and the eligibility as-of date fall inside the delivery month, and a claim
+    is never processed before it was received;
+  - frequency code, status and `original_claim_id` agree (original, replacement, reversal);
+  - `member_id` and MBI map one to one;
+  - every claim's member arrived in an eligibility delivery no later than the claim.
+
+  Because reversals carry negated amounts, `sum(paid_amount)` per delivery month already
+  matches the answer key's `net_paid_by_processed_month.csv`.
+`dbt source freshness` warns when a monthly delivery is 35 days overdue.
+
+### Stop vs warn
+
+Each test is a **stop** or a **warn** (policy in `dbt/macros/test_scoping.sql`):
+
+- **Stop** (dbt severity `error`, the default): the data would make the intermediate
+  layer wrong. That covers keys and grain, identity columns, claim-family linkage,
+  amounts used in netting, service dates, and codes the intermediate logic branches on.
+  `dbt build` then **skips** every model downstream of the failing staging model, so
+  the intermediate tables keep their last good state. The skipped file stays
+  "unprocessed", so a corrected re-send catches the intermediate layer up with no
+  backfill. Stops always check every delivery month. If they checked only the new
+  months, the next delivery's run would pass and pull the skipped file's rows in.
+- **Warn** (`config: *warn` in the YAML, `severity='warn'` in singular tests): the
+  intermediate layer stays correct, but the data looks off. Examples are descriptive
+  codes, claims for a member not delivered yet, dates outside the delivery month, and
+  odd amount lines. Nothing is skipped. When dbt is given the months being processed
+  (`--vars '{delivery_months: ["2025-03"]}'`), warns check only those months, so an
+  accepted warning does not come back on every later delivery. Local builds without
+  the var check everything.
+- Humana amount rules (paid ≤ allowed ≤ billed, denied pays nothing, cost share =
+  allowed − paid, reversals never positive) warn per line. They **stop** when more than
+  1% of a month's lines (and at least 5) break them, because that means a broken
+  extract rather than a few odd lines.
+
+`tests/test_dbt_gating.py` proves the gating on corrupted copies of real deliveries:
+- a stop skips the intermediate model;
+- a stop keeps blocking later months;
+- a re-send recovers the intermediate tables exactly;
+- warns build and are scoped to the delivery months being processed;
+- many bad amount lines escalate to a stop.
 
 ```bash
-python generate_cclf.py   --seed 42 --start 2023-01 --end 2025-12
-python generate_humana.py --seed 42 --start 2023-01 --end 2025-12
-python validate_cclf.py
-python validate_humana.py
-python validate_crosspayer.py
+.venv/Scripts/python -m pip install -e ".[dev,dbt]"
+cd dbt
+../.venv/Scripts/dbt build               # models + tests (profiles.yml is in dbt/)
+../.venv/Scripts/dbt source freshness
 ```
 
-Standard library only (no Faker). Same seed + months = byte-identical output
-(covered by the tests). **Use the same `--seed`, `--start` and `--end` for both
-generators**, or the switchers will not line up. Options:
+## Intermediate: state across deliveries (incremental)
 
-- both: `--seed`, `--start`, `--end` (YYYY-MM)
-- `generate_cclf.py`: `--output-dir` (default `output/`), `--answer-key-dir` (default
-  `answer_key/`)
-- `generate_humana.py`: `--output-dir` (default `output/humana/`), `--answer-key-dir`
-  (default `answer_key/humana/`), `--crossover-dir` (default `answer_key/`)
+Both feeds deliver deltas. CCLF8 and HUM_ELIG carry only new, changed or terminated members.
+Claim files carry only the versions processed that month, and a cancellation, adjustment,
+reversal or replacement of an earlier claim can arrive months later. So intermediate is
+incremental, but **not append-only**: a new delivery can change rows built from older ones.
 
-Re-running deletes and replaces that generator's CSVs only. `generate_cclf.py`
-ignores `output/humana/` and vice versa. Both write the same
-`answer_key/crossover_members.csv`.
-
-## Shared member registry and payer switchers
-
-`member_registry.py` builds every person once from the seed (stream
-`registry:<seed>`), with a list of coverage spans `(payer, start, end)`:
-
-- FFS population: 118 at the start, 7–10 newly attributed per month.
-- MA (Humana) population: 88 at the start, 2–3 new enrollees per month (4–7 each
-  January). About 6% leave Humana for another MA plan each January 1.
-- **Switchers** (15–20 people; 17 for seed 42), listed in
-  `answer_key/crossover_members.csv` (`BENE_MBI_ID, MEMBER_ID, direction,
-  effective_date, enrollment_period`):
-  - most go **FFS → MA on January 1** (Annual Election Period) of 2024 or 2025;
-  - 3 switch **mid-year** (effective February–April 1; MA Open Enrollment / SEP);
-  - 3 go **MA → FFS on January 1** (2 are round trips: FFS → MA → FFS).
-- Coverage never overlaps: the old span ends the day before the new one starts. Each
-  generator only produces claims inside its own payer's spans.
-- Switchers do not die or get random demographic updates. Their address moves are
-  planned in the registry, so both feeds report the same address at every handoff.
-- Providers come from one pool. Shared hospitals, SNF and professionals appear in both
-  feeds; HHA and hospice are FFS-only; a few Humana-only providers (a primary-care
-  group and a cardiology group) plus one out-of-network hospital and one
-  out-of-network urgent-care physician appear only in Humana claims.
-
----
-
-# CCLF (Medicare FFS)
-
-## Format
-
-- `output/YYYY-MM/CCLF{8,1,4,5}_YYYYMM.csv`: 36 months × 4 files = 144 files.
-- CSV with header row, comma-delimited, UTF-8 (ASCII in practice), LF line endings,
-  empty string = missing. Real CCLF is fixed-width; CSV is intentional here.
-- Dates `YYYY-MM-DD`, amounts with exactly 2 decimals (negative for cancellations).
-- ICD-10-CM codes are stored **without the decimal point** (`E119`, `N1831`, `F32A`),
-  as in real CMS claims files. Add the dot in your staging layer if you want it.
-- `DGNS_PRCDR_ICD_IND = 0` (ICD-10) everywhere.
-- Sizes: monthly files ~3.4–4.4 KB (range 3–5 KB). The first month is the initial
-  load: CCLF8 ~18 KB, claims files ~9–10 KB. The generator tunes row counts to a byte
-  budget per file and prints the actual sizes at the end.
-- Column names and order follow the lists in the project brief, which are a subset of
-  the CCLF Information Packet layouts. They were not checked against the packet
-  itself, so expect differences from production CCLF files.
-
-## Incremental load semantics
-
-Each monthly file holds only what CMS "loaded" that month.
-
-### CCLF8 (beneficiaries)
-
-- **Initial month**: the starting population (118 beneficiaries), all `NEW`.
-- **Later months**: newly attributed beneficiaries and switchers arriving from MA
-  (`NEW`), plus changed records for existing ones (`UPDATE`): address/ZIP change, dual
-  status change, Part B enrollment, death date added, FFS coverage ended or resumed.
-- Every `UPDATE` is a **full row with current values**, never a partial update. The
-  latest row per `BENE_MBI_ID` is the current state. `BENE_AGE` is computed as of the
-  delivery month, so it moves forward over time even with no other change.
-- A beneficiary appears at most once per monthly file.
-- `RECORD_CHANGE_TYPE` (`NEW` / `UPDATE`) is a **synthetic helper column, not a real
-  CCLF field**. Real CCLF8 sends no change flag; you have to diff against what you
-  already hold. Try ignoring the column and deriving it yourself.
-- MBIs follow the CMS MBI format and never change (no CCLF9 crosswalk is generated).
-- Deaths: `BENE_DEATH_DT` and `BENE_RNG_END_DT` are filled in, in the death month or
-  the month after. Dead beneficiaries get no further CCLF8 updates. Late-arriving
-  claims with service dates before the death can still show up later.
-- **Leaving FFS for MA**: in the month the MA coverage starts, the beneficiary gets an
-  `UPDATE` with `BENE_RNG_END_DT` = the last day of FFS coverage (`FFS_END` in
-  `member_changes.csv`). No FFS claims are dated after it. A beneficiary returning from
-  MA gets an `UPDATE` with a new `BENE_RNG_BGN_DT` and a blank `BENE_RNG_END_DT`
-  (`FFS_RETURN`). Someone who starts in MA and moves to FFS arrives as `NEW`.
-
-### Claims (CCLF1 / CCLF4 / CCLF5)
-
-- `CLM_IDR_LD_DT` (claim load date) always falls inside the delivery month. It
-  decides which file a claim version lands in.
-- About 90% of claims have service dates 0–3 months before the load month. About 10%
-  are **late-arriving**, with service dates 4–12 months earlier (realized: 10.2% for seed 42).
-- Every claim falls inside an FFS span (`BENE_RNG_BGN_DT`..`BENE_RNG_END_DT`), and
-  none is after death or before Part B enrollment (Part B).
-- Utilization is concentrated: the top 20% of beneficiaries generate about 80% of claims.
-
-## Cancellations and adjustments
-
-`CLM_ADJSMT_TYPE_CD`: `0` = original, `1` = cancellation, `2` = adjustment.
-
-- About 5% of claim versions are cancellations and about 5% are adjustments. Each one
-  targets an original delivered 1–6 months earlier, and each original is actioned at
-  most once.
-- The action reuses the original's identifying data (beneficiary, provider, service
-  dates, diagnoses, lines) and gets a **new `CUR_CLM_UNIQ_ID`** and a new load date.
-- **Linkage**: the action carries the **same `CLM_CNTL_NUM`** as its original. On
-  CCLF1 it also sets `CLM_ORG_CNTL_NUM` to the original's control number (blank on
-  originals). Treat `(file, CLM_CNTL_NUM)` as the claim family key.
-- **Cancellation**: amounts are negated (`CLM_PMT_AMT`,
-  `CLM_MDCR_INSTNL_TOT_CHRG_AMT`, and each Part B line's paid and allowed amounts), so
-  original + cancel nets to zero. Part A `CLM_BILL_FREQ_CD = 8` (void).
-- **Adjustment**: a full **replacement** with a changed payment amount, not a delta.
-  Part A: `CLM_PMT_AMT` changes. Part B: one line is repriced. Part A
-  `CLM_BILL_FREQ_CD = 7` (replacement).
-- A naive `SUM()` over all rows is therefore **wrong**: it double-counts adjusted
-  claims. The correct rule:
-
-  > Group versions by `(part, CLM_CNTL_NUM)`. Cancelled family → 0. Adjusted family
-  > → the adjustment's amount. Otherwise → the original's amount.
-  > Part B amount = sum of `CLM_LINE_CVRD_PD_AMT` over the claim's lines.
-
-## Answer key (`answer_key/`)
-
-These files are written from the generator's in-memory simulation, not by re-reading
-the CSVs. `validate_cclf.py` then re-derives them from the CSVs and checks that the
-two agree.
-
-| File | What your ETL should reproduce |
-|---|---|
-| `final_members.csv` | Latest state of every beneficiary (all CCLF8 columns except the helper, plus `FIRST_DELIVERY_MONTH`, `LAST_DELIVERY_MONTH`) |
-| `net_paid_by_service_month.csv` | Part A / Part B / total net paid by month of the original `CLM_FROM_DT`, after cancellations and adjustments |
-| `net_paid_by_load_month.csv` | Net change booked in each delivery month (originals, plus adjustment deltas, minus cancelled amounts). Sums to the same grand total |
-| `claim_actions.csv` | Every cancellation/adjustment with its original: IDs, load months, amounts, final amount |
-| `member_changes.csv` | Every CCLF8 row's reason (`NEW`, `ADDRESS`, `DUAL`, `PARTB`, `DEATH`, `FFS_END`, `FFS_RETURN`) and a short detail, useful for SCD2 testing |
-| `crossover_members.csv` | Every FFS ↔ MA switch (shared with the Humana generator) |
-| `summary.json` | Counts and grand totals |
-
-## Validator (`validate_cclf.py`)
-
-It reads only the CSVs and the answer key, prints PASS/FAIL per check, and exits 1
-on any failure. It ignores `output/humana/`. Checks:
-
-- All 144 files present; headers match; date and amount formats
-- File sizes within range (initial load and monthly)
-- Valid MBIs; `NEW` exactly once and before any `UPDATE`; MBI→HICN stable
-- Every claim MBI exists in a CCLF8 delivered the same month or earlier
-- Every CCLF4 claim exists in the same month's CCLF1; 1–6 dx rows; sequence 0 =
-  `PRNCPL_DGNS_CD`
-- `CUR_CLM_UNIQ_ID` unique across all files and months
-- `CLM_IDR_LD_DT` inside the delivery month; every NPI passes the Luhn check
-- Cancellations/adjustments link to exactly one earlier original with the same
-  identifying data; cancel = −original; adjustment ≠ original; shares 3–7%
-- Claims inside an FFS span; none after death
-- Late-arriving share 7–13%; utilization concentration
-- Answer key files match a recomputation from the CSVs
-
----
-
-# Humana Medicare Advantage
-
-> **The field names are invented.** Humana's real extract layouts are proprietary.
-> These columns are modeled on typical MA payer eligibility/claims extracts and on the
-> APCD Common Data Layout (CDL), so they look like what a payer sends. They are not a
-> Humana specification. Contract IDs (`H9101`, `H9102`), plan names and member IDs
-> are fake.
-
-## Format
-
-- `output/humana/YYYY-MM/HUM_{ELIG,MEDCLM}_YYYYMM.csv`: 36 months × 2 files = 72 files.
-- Same CSV conventions as CCLF: header row, comma-delimited, LF, empty = missing,
-  dates `YYYY-MM-DD`, amounts with 2 decimals, ICD-10 codes without the dot,
-  `ICD_VERSION = 0`.
-- Sizes: monthly files ~4.2–5.4 KB (range 4–6 KB). Initial load: HUM_ELIG ~17 KB
-  (range 15–25 KB), HUM_MEDCLM ~11 KB (range 10–15 KB). Sizes print at the end.
-- Products: `HMO` (H9101-001), `D-SNP` (H9101-003, dual-eligible members only) and
-  `PPO` (H9102-002). Duals are mostly in the D-SNP.
-
-## HUM_ELIG (eligibility)
-
-- `MEMBER_ID` is `H` + 9 digits, 1:1 with `MBI` (the same MBI as in CCLF for
-  switchers).
-- **Initial month**: the starting roster (88 members), all `NEW`.
-- **Later months**: new enrollees and switchers from FFS (`NEW`), changed members
-  (`UPDATE`) and terminations (`TERM`). Each row is a **full row with current
-  values**; at most one row per member per month.
-- Change types (reason in `answer_key/humana/member_changes.csv`): PCP change
-  (`PCP_NPI`, `PCP_TIN`, `PCP_ATTRIBUTION_START_DT`), address change, dual/LIS change
-  (D-SNP members stay dual), disenrollment, death.
-- **Disenrollment** (`TERM`): delivered in the month after coverage ends, with
-  `ENROLLMENT_END_DT` = the last covered day (to FFS, or to another MA plan).
-- **Death** (`TERM`): `DEATH_DT` filled in, `ENROLLMENT_END_DT` = end of the death
-  month, delivered in the death month or the month after. Nothing is delivered for a
-  member after a `TERM`.
-- `RECORD_CHANGE_TYPE` is a synthetic helper column, as in CCLF8.
-
-## HUM_MEDCLM (medical claims)
-
-- **One row per claim line**; header fields repeat on every line. The key is
-  `(CLAIM_ID, CLAIM_LINE_NUM, CLAIM_FREQ_CD)`.
-- Delivered by **`PROCESSED_DT` month**; `RECEIVED_DT` precedes it and the service
-  dates precede both. About 10% of originals are late-arriving (service 4–12 months
-  before processing).
-- `CLAIM_FORM_TYPE` `I` (UB-04: inpatient `BILL_TYPE 11x` with DRG, outpatient/ER
-  `13x`, SNF `21x`, with revenue codes and `FACILITY_CCN`) or `P` (CMS-1500:
-  `PLACE_OF_SERVICE`, `RENDERING_NPI`, `PROVIDER_SPECIALTY`). Fields that do not apply
-  to the form are blank.
-- Up to 12 diagnosis codes (`DX_CODE_1..12`); `DX_CODE_1` is the principal.
-- Amounts: `BILLED_AMT > ALLOWED_AMT >= PAID_AMT`, and `COPAY + COINSURANCE +
-  DEDUCTIBLE = ALLOWED − PAID` (except capitated lines, below). Cost sharing follows
-  the product: copays per visit type, per-day inpatient copay for days 1–5, SNF days
-  21+, PPO radiology coinsurance and deductibles; D-SNP members pay $0.
-- Claims fall only inside the member's MA enrollment and never after death.
-- Out-of-network claims (`IN_NETWORK_FLAG = N`): some ER visits at a non-contracted
-  hospital, and urgent-care visits (POS 20).
-
-## Reversals, replacements, denials and capitation
-
-`CLAIM_FREQ_CD`: `1` = original, `7` = replacement, `8` = void/reversal.
-`CLAIM_STATUS`: `P` = paid, `D` = denied, `R` = reversed.
-
-- **Replaced (~5% of originals)**: in one later month, a **reversal** (same
-  `CLAIM_ID`, status `R`, freq `8`, every amount negated, `ORIG_CLAIM_ID` = the
-  original) plus a **replacement** (new `CLAIM_ID`, freq `7`, `ORIG_CLAIM_ID` = the
-  original, repriced so `PAID_AMT` changes).
-- **Voided (~3%)**: the reversal only.
-- **Denied (~3%)**: status `D`, `ALLOWED_AMT = PAID_AMT = 0`, billed kept.
-- Institutional `BILL_TYPE` ends in the frequency code (`111`, `117`, `118`).
-- Unlike CCLF, the reversal makes a **plain `SUM(PAID_AMT)` over every row correct**:
-  original + reversal nets to zero and the replacement adds the new amount. To report
-  by claim, group by family: the original `CLAIM_ID` = `ORIG_CLAIM_ID` on reversals
-  and replacements.
-- **Capitation**: about 30% of professional claims rendered by the member's own PCP
-  are capitated encounters (`CAPITATED_FLAG = Y`, `PAID_AMT = 0`, `ALLOWED_AMT`
-  populated, no `PAID_DT`). This applies only to HMO and D-SNP members whose PCP
-  group holds a capitated arrangement. Capitated and denied claims are never reversed.
-
-## Field mapping to CCLF
-
-| Concept | CCLF | Humana |
+| Model (schema `intermediate`) | Grain | Key |
 |---|---|---|
-| Medicare beneficiary ID | `BENE_MBI_ID` | `MBI` (plus payer `MEMBER_ID`) |
-| Name, DOB | `BENE_1ST_NAME`, `BENE_MIDL_NAME`, `BENE_LAST_NAME`, `BENE_DOB` | `FIRST_NAME`, `MIDDLE_INITIAL`, `LAST_NAME`, `DOB` |
-| Sex | `BENE_SEX_CD` (`1`/`2`) | `GENDER` (`M`/`F`) |
-| Address | `BENE_LINE_1_ADR`, `GEO_ZIP_PLC_NAME`, `GEO_USPS_STATE_CD`, `GEO_ZIP5_CD` | `ADDRESS_LINE_1`, `CITY`, `STATE`, `ZIP` |
-| County | `BENE_FIPS_STATE_CD` + `BENE_FIPS_CNTY_CD` | `COUNTY_FIPS` (5 digits) |
-| Coverage span | `BENE_RNG_BGN_DT`, `BENE_RNG_END_DT` | `ENROLLMENT_START_DT`, `ENROLLMENT_END_DT` |
-| Dual status | `BENE_DUAL_STUS_CD` (code, `NA` = not dual) | `DUAL_FLAG` (`Y`/`N`), `LIS_FLAG` |
-| Death | `BENE_DEATH_DT` | `DEATH_DT` (+ `TERM` row) |
-| Change flag (synthetic) | `RECORD_CHANGE_TYPE` `NEW`/`UPDATE` | `RECORD_CHANGE_TYPE` `NEW`/`UPDATE`/`TERM` |
-| Claim ID | `CUR_CLM_UNIQ_ID` (new per version) | `CLAIM_ID` (reversal reuses it; replacement is new) |
-| Claim family key | `CLM_CNTL_NUM` (+ `CLM_ORG_CNTL_NUM` on CCLF1) | original `CLAIM_ID` = `ORIG_CLAIM_ID` |
-| Version type | `CLM_ADJSMT_TYPE_CD` `0`/`1`/`2` | `CLAIM_FREQ_CD` `1`/`8`/`7` + `CLAIM_STATUS` |
-| Delivery date | `CLM_IDR_LD_DT` | `PROCESSED_DT` |
-| Institutional vs professional | separate files (CCLF1/4 vs CCLF5) | `CLAIM_FORM_TYPE` `I`/`P` in one file |
-| Bill type | `CLM_BILL_FAC_TYPE_CD` + `CLM_BILL_CLSFCTN_CD` + `CLM_BILL_FREQ_CD` | `BILL_TYPE` (3 digits) |
-| Service dates | `CLM_FROM_DT`, `CLM_THRU_DT` | `SERVICE_FROM_DT`, `SERVICE_TO_DT` (+ line dates) |
-| Facility | `PRVDR_OSCAR_NUM`, `FAC_PRVDR_NPI_NUM` | `FACILITY_CCN`, `BILLING_NPI` |
-| Rendering / attending | `RNDRG_PRVDR_NPI_NUM` (CCLF5), `ATNDG_PRVDR_NPI_NUM` (CCLF1) | `RENDERING_NPI`, `ATTENDING_NPI` |
-| Provider TIN | `CLM_RNDRG_PRVDR_TAX_NUM` (CCLF5) | `BILLING_TIN` |
-| DRG | `DGNS_DRG_CD` | `DRG_CD` |
-| Diagnoses | CCLF4 rows (`CLM_VAL_SQNC_NUM`), `PRNCPL_DGNS_CD` | `DX_CODE_1..12` on every line |
-| Procedure | `CLM_LINE_HCPCS_CD` (CCLF5) | `PROCEDURE_CD`, `REVENUE_CD` |
-| Paid amount | `CLM_PMT_AMT` (CCLF1), `CLM_LINE_CVRD_PD_AMT` (CCLF5) | `PAID_AMT` (per line) |
-| Allowed / charges | `CLM_LINE_ALOWD_CHRG_AMT` (CCLF5), `CLM_MDCR_INSTNL_TOT_CHRG_AMT` | `ALLOWED_AMT`, `BILLED_AMT` |
-| Member cost share | (not in these layouts) | `COPAY_AMT`, `COINSURANCE_AMT`, `DEDUCTIBLE_AMT` |
-| Plan / network / capitation | (FFS: n/a) | `CONTRACT_ID`, `PBP_ID`, `IN_NETWORK_FLAG`, `CAPITATED_FLAG` |
-| Attributed PCP | (ACO attribution, not in CCLF8) | `PCP_NPI`, `PCP_TIN`, `PCP_ATTRIBUTION_START_DT` |
+| `int_cclf__beneficiary_versions` | beneficiary version (SCD type 2) | `beneficiary_version_id` |
+| `int_cclf__claim_families` | claim family = original + later cancellation/adjustment | `claim_family_key` (`part:claim_control_number`) |
+| `int_humana__member_versions` | member version (SCD type 2) | `member_version_id` |
+| `int_humana__claim_families` | claim family = original + later reversal/replacement | `claim_family_key` (the original's `claim_id`) |
 
-## Answer key (`answer_key/humana/`)
+- **Beneficiary versions.** A new version starts when the hash of the tracked attributes
+  differs from the previous delivered row. This works for change-only deliveries and for
+  full monthly snapshots. Fields:
+  - `valid_from` / `valid_to` are delivery months (`valid_to` exclusive, NULL while current).
+  - `change_type` (NEW/UPDATE) and `changed_columns` are derived. They are never read from
+    the generator's `RECORD_CHANGE_TYPE` helper; a test checks the two agree.
+  - Age is not tracked, because it changes every month without a real change.
+- **Claim families.** Versions are grouped by (part, control number), and the latest
+  version decides the net:
+  - cancellation → 0;
+  - adjustment → the adjustment's amount;
+  - otherwise → the original's amount.
 
-| File | What your ETL should reproduce |
+  Part B rolls CCLF5 lines up to claims first. A cancellation whose original was never
+  loaded still forms a family (`has_original = false`, a warning) instead of being dropped.
+- **Humana member versions.** The same hash-based SCD2. `change_type` adds `TERM` for the
+  version in which `enrollment_end_date` first appears. `file_as_of_date` moves every month,
+  so it isn't tracked; `last_file_as_of_date` keeps the newest one.
+- **Humana claim families.** Lines roll up to claim versions, which group on
+  `coalesce(original_claim_id, claim_id)`, the original's ID. The status comes from which
+  versions are still active (not cancelled by a reversal, which repeats the claim ID it
+  reverses), so it never depends on version order:
+  - an active replacement → `REPLACED`;
+  - an active original → `DENIED` (status D) or `ORIGINAL`;
+  - nothing active → `VOIDED`.
+
+  Humana reversals carry negated amounts, so `net_paid_amount` is simply the sum over every
+  version. A test checks that sum against the status rule (voided 0, replaced = the
+  replacement, denied 0, else the original). That test caught a real bug while the model
+  was being built: a same-day reversal sorted after its replacement.
+
+**Incremental strategy: affected keys**
+([`macros/incremental_by_affected_keys.sql`](dbt/macros/incremental_by_affected_keys.sql)).
+Every row records the SHA-256s of the raw files it came from (`_source_checksums`). Each run:
+
+1. Finds the keys that have rows from a raw file the model has not processed yet: a new
+   month, or a corrected re-send of an old one.
+2. Adds the keys built from a file that staging no longer shows: a delivery a re-send
+   superseded (it stays in raw, but is no longer current).
+3. Recomputes the full history of only those keys and replaces them (`delete+insert`).
+4. A post-hook deletes keys whose source rows vanished entirely.
+
+Delivery order doesn't matter, and no watermark can drift. Recomputing a key's whole
+history is cheap, since a beneficiary or claim family has only a few rows.
+`dbt build --full-refresh` rebuilds everything.
+
+**Proof** (`tests/test_dbt_intermediate.py`, offline, about 2 minutes). The test runs both
+generators (the pinned `synthetic-payer-files` package) for all 36 months, ingests every file with the real validation and Parquet code
+into a local raw folder, and runs dbt against it. Checks:
+
+- A full refresh matches both answer keys exactly:
+  - **CMS:** every current member with every attribute, every member change, all claim
+    actions, net paid by service month and by load month, and the totals.
+  - **Humana:** every current member, every member change (including disenrollments and
+    deaths), every void and replacement, net paid by service month, capitated encounters
+    by month, and the totals.
+- Loading the months in uneven batches (3, then 1 at a time, then 24 at once) gives the
+  same tables as a full refresh, row for row.
+- Re-sending old months then also equals a full refresh:
+  - CCLF8 drops a beneficiary and a history row;
+  - CCLF1 drops a claim and reprices one;
+  - HUM_MEDCLM drops a replacement, so that family falls back to `VOIDED`;
+  - HUM_ELIG drops a member update.
+
+The test was shown to fail when the vanished-file cleanup is removed. Skip it with
+`pytest -m "not dbt"`.
+
+## Running it
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -e ".[dev]"     # Windows; use .venv/bin on macOS/Linux
+
+# credentials come from the AWS CLI default profile (aws configure)
+.venv/Scripts/python -m claims_etl.ingestion.cli --key cms/cclf/claims_header/CCLF1_202301.csv
+.venv/Scripts/python -m claims_etl.ingestion.cli --scan
+```
+
+JSON-lines logs go to stderr, and a JSON summary of manifest records goes to stdout. Exit codes:
+`0` all success/skipped, `2` something was quarantined, `1` an error occurred.
+
+## Quarantine notifications (GitHub issues)
+
+A decoupled notifier turns each quarantine report (`quarantine/.../<file>.csv.error.json`) into
+a GitHub issue. Ingestion doesn't change, and a GitHub outage can't affect loading or quarantine.
+
+- **One issue per checksum.** Before opening an issue it looks for an *open* `quarantine` issue
+  whose body has the line ``Checksum: `<sha256>` ``. The lookup uses the Issues list endpoint, not
+  search, which lags. If it finds one, it adds a "quarantined again" comment instead.
+- **Ticket record:** `s3://fredr-claims-raw-2026/_tickets/<sha256>.json` stores the issue URL and
+  number and every batch already notified. It's kept apart from the manifest, which only
+  ingestion writes. Re-running for the same event makes no API calls.
+- **Public-safe content.** Issues carry check names, counts, line numbers, column names, and file
+  metadata. Quoted values in CSV check details survive only if they are shaped like column names
+  (`BENE_MBI_ID`), so a headerless CCLF8 file can't publish beneficiary names or cities. Details
+  are truncated and rendered as code so they can't @mention anyone.
+- **Resilient.** It retries 5xx/429/rate-limited responses with backoff, honoring `Retry-After` and
+  `x-ratelimit-reset`. It never logs the token. Failures exit non-zero, and `--scan` retries later.
+- **Configurable:** labels, title template, and per-check next steps live in
+  `config/notifications.yml`. Moving to Jira would only replace `github_client.py`.
+
+Issue title: `[Quarantine] <file_type> <file name>: <failed check>`, for example
+`[Quarantine] claims_header CCLF1_202301.csv: csv_header`.
+
+```bash
+cp .env.example .env    # then set GITHUB_TOKEN (fine-grained, this repo only, Issues: read/write)
+.venv/Scripts/python -m claims_etl.notifications.cli --scan
+.venv/Scripts/python -m claims_etl.notifications.cli --error-key quarantine/cms/cclf/<type>/<file>.csv.error.json
+```
+
+In AWS, the `claims-etl-notify` Lambda ([`infra/terraform/notifier.tf`](infra/terraform/notifier.tf))
+runs this automatically for every new `quarantine/*.error.json`. It reads `GITHUB_TOKEN` from SSM
+Parameter Store (`/claims-etl/GITHUB_TOKEN`, a SecureString created outside Terraform so the token
+never lands in Terraform state) and `GITHUB_REPO` from a Terraform-managed parameter. A failure
+raises, so Lambda retries it twice. S3 triggers don't fire for files that already exist, so after
+an outage run `--scan` once.
+
+One-time token setup (PowerShell, from the project folder; reads the token from `.env`):
+
+```powershell
+$t = (Select-String -Path .env -Pattern '^GITHUB_TOKEN=(.+)$').Matches[0].Groups[1].Value
+aws ssm put-parameter --region us-east-2 --name /claims-etl/GITHUB_TOKEN --type SecureString --value $t
+Remove-Variable t
+```
+
+## Automatic ingestion (AWS Lambda)
+
+Uploading a `.csv` under `s3://fredr-claims-landing-2026/cms/cclf/` triggers the
+`claims-etl-ingest` Lambda, which runs the same `process_file`. It's defined in
+[`infra/terraform/`](infra/terraform/):
+
+| Resource | Details |
 |---|---|
-| `final_members.csv` | Latest state of every member (all HUM_ELIG columns except the helper, plus `FIRST_DELIVERY_MONTH`, `LAST_DELIVERY_MONTH`) |
-| `net_paid_by_service_month.csv` | Institutional / professional / total net paid by the original's service month, after reversals and replacements |
-| `net_paid_by_processed_month.csv` | Paid booked in each delivery month (sum of every row's `PAID_AMT`) |
-| `capitated_encounters_by_month.csv` | Capitated claims, lines and allowed amount by service month |
-| `claim_actions.csv` | Every void and replacement with its original, amounts and final paid |
-| `member_changes.csv` | Every HUM_ELIG row's reason (`NEW`, `PCP`, `ADDRESS`, `DUAL_LIS`, `DISENROLL`, `DEATH`) and a detail |
-| `summary.json` | Counts and grand totals |
+| Lambda `claims-etl-ingest` | Python 3.13, 1024 MB, 300 s timeout, 2 GB `/tmp` |
+| pyarrow | AWS SDK for pandas public layer (`AWSSDKPandas-Python313:17`, pyarrow 24) |
+| Package | `build/lambda.zip`: our code, `config/`, PyYAML, requests (~1.6 MB, deterministic; shared with the notifier) |
+| IAM role | Least privilege: read/delete `cms/cclf/*`, write `archive/*` and `quarantine/*` in landing, write `cms/cclf/*` and `_manifests/*` in raw, own log group only |
+| Trigger | S3 `ObjectCreated`, prefix `cms/cclf/`, suffix `.csv` (archive/quarantine moves can't re-trigger) |
+| Retries | An `error` outcome raises, so Lambda retries async invocations twice. `quarantined` is final and not retried |
+| Logs | `/aws/lambda/claims-etl-ingest`, JSON lines, 30-day retention |
+| Notifier | `claims-etl-notify` (`notifier.tf`): 256 MB, 300 s timeout, same package without the pandas layer; trigger `quarantine/*.error.json` |
 
-## Validators
+Deploy or update (both packages; the transform Lambda is in the next section):
 
-`validate_humana.py` (output/humana vs answer_key/humana) checks: files, headers and
-formats; sizes; MEMBER_ID/MBI format and 1:1; `NEW` first and nothing after `TERM`;
-plan/contract consistency and D-SNP members being dual; claims only for delivered
-members, inside an enrollment span and not after death; a unique claim-line key;
-reversal/replacement linkage (negation, same month, paid changed) and the action
-shares; form-type field rules; amount and cost-share arithmetic; date ordering; the
-late share; capitation only on PCP-rendered claims at ~30%; out-of-network presence;
-and every answer key file. It recomputes net paid as a plain `SUM(PAID_AMT)`, a
-different method from the generator's claim-family logic.
+```bash
+.venv/Scripts/python scripts/build_lambda.py              # ingest + notify package
+.venv/Scripts/python scripts/build_lambda.py --transform  # transform package
+cd infra/terraform
+terraform init                                       # first time only
+terraform plan -out=tfplan && terraform apply tfplan
+```
 
-`validate_crosspayer.py` (CCLF output vs Humana output) checks: 15–20 switchers with
-valid directions and dates; that the only MBIs in both feeds are the listed switchers;
-no overlapping FFS/MA coverage, with the observed switches matching the crossover
-list; no CCLF claims during MA coverage and no Humana claims during FFS coverage; and
-the same name/DOB/sex everywhere, plus the same address and dual status in each
-switch month.
+Terraform state is local (gitignored). Move it to an S3 backend before CI or anyone else runs it.
 
----
+## Event-driven transforms (staging + intermediate)
 
-## Reference data used
+Every file that ingestion puts in raw triggers a dbt build of its feed, with no schedule:
 
-- Providers: 6 facilities (2 shared hospitals, SNF, HHA, hospice, plus 1
-  out-of-network MA hospital; Ohio CCNs) and 13 professionals across 6 TINs, all
-  Luhn-valid and fake. CCLF uses the 14 FFS NPIs.
-- Claim types (CCLF1): outpatient 40, inpatient 60 (with MS-DRG and length of stay),
-  SNF 20, swing bed 30, home health 10, hospice 50. CCLF5 uses claim type 71.
-- HCPCS: 99213, 99214, 99203, 99204, G0439, 36415, 80053, 85025, 83036, 93000,
-  71046, 20610, at approximate national allowed amounts. CCLF paid is 80% of allowed;
-  labs and the annual wellness visit are paid at 100% (no coinsurance). Humana adds
-  ER levels 99283–99285 and G0463 clinic visits on the facility side.
-- Population: ~10% under 65 (disabled, `BENE_ORGNL_ENTLMT_RSN_CD=1`, some ESRD=2),
-  ~15% dual-eligible, a few ESRD, ~3% deaths.
+```
+claims-etl-ingest ──FileIngested──► EventBridge rule ──► SQS FIFO (one message group) ──► claims-etl-transform
+                          └── undeliverable ──► claims-etl-transform-undelivered
+                                                              └── after 3 failed receives ──► dead-letter queue
+```
 
-## Tuning
+1. **Event.** After the manifest is written and before the landing file is archived,
+   ingestion publishes `FileIngested` (feed, file type, delivery month, checksum, raw URI) to
+   the default EventBridge bus ([`events.py`](src/claims_etl/events.py)). If publishing fails,
+   the run ends in `error` with the file still in landing. The retry finds it already loaded
+   (`skipped_duplicate`), publishes again with `redelivered: true`, and archives it.
+2. **Queue.** A FIFO queue with a single message group runs builds one at a time, in order.
+   Up to 10 waiting events share one build.
+3. **Build** ([`transform/runner.py`](src/claims_etl/transform/runner.py)). The runner selects
+   the **whole feed** (`source:cclf+` / `source:humana+`), not just the file type that arrived.
+   A bad CCLF5 file must keep blocking claim families even when a clean CCLF1 comes next. With
+   `source:cclf.claims_header+` the CCLF5 stop tests would not run, and the bad lines would
+   flow in (`test_dbt_gating.py` checks this). `delivery_months` is set to the events' months,
+   so only the WARN tests are scoped (see [Stop vs warn](#stop-vs-warn)). dbt runs in a
+   subprocess against a **working copy** of the DuckDB state file.
+4. **Outcome.** The runner reads `run_results.json` and records one of four outcomes:
 
-Population, switcher and provider parameters live at the top of `member_registry.py`.
-Byte targets and claim shares live at the top of `generate_cclf.py` and
-`generate_humana.py`. After any change, run all three validators across several seeds.
-The tests run seed 7; a 30-seed sweep of all three validators passed when this was
-written.
+   | Outcome | Meaning | State | Queue |
+   |---|---|---|---|
+   | `passed` | all tests pass | published | message deleted |
+   | `warned` | WARN tests found issues; intermediate built | published | deleted |
+   | `stopped` | a STOP test failed; dbt skipped the intermediate models below it | published (the stopped feed stays pending: its checksum is not in intermediate yet) | deleted |
+   | `error` | a model or test could not run (SQL error, S3 trouble) or dbt crashed | **kept** | raised → retried after a backoff → DLQ |
+
+   **Retry backoff.** SQS retries a failed message only when its visibility timeout runs
+   out: 3600 s here (6 × the function timeout, AWS's guidance for Lambda consumers). Waiting
+   that long after a 6-second crash would stall the single FIFO group for an hour per attempt.
+   So before raising, the handler shortens the batch's visibility to `retry_backoff_seconds`
+   in `config/transform.yml`, by receive count: 2 min, 5 min, then 10 min. A passing problem
+   (a state conflict, S3 trouble) is retried within minutes, and a persistent one reaches the
+   DLQ in about 17 minutes instead of 3 hours. The hour stays the backstop for a function
+   that dies before it can shorten anything (timeout, out of memory).
+
+   A run report (`report.json`: outcome, test names, failure **counts**, skipped models, the
+   triggering files; never row values) and `run_results.json` go to
+   `s3://fredr-claims-raw-2026/_transform/runs/<run_id>/`.
+5. **State.** The DuckDB file lives at `_transform/state/claims_lakehouse.duckdb` in the raw
+   bucket. The upload is conditional on the ETag downloaded at the start (`If-Match`, or
+   `If-None-Match` for the first run), so a second writer can never silently overwrite it.
+   The previous version is copied to `claims_lakehouse.previous.duckdb` first.
+
+Run the same build by hand ([`transform/cli.py`](src/claims_etl/transform/cli.py)):
+
+```bash
+claims-transform --feed cclf --months 2023-03     # S3 state + S3 raw, exactly like the Lambda
+claims-transform --all                            # both feeds; WARN tests over all history
+claims-transform --all --db dbt/claims_lakehouse.duckdb --raw-root <folder>   # fully local
+```
+
+Exit codes: 0 = passed or warned, 2 = stopped, 1 = error.
+
+| Resource (`transform.tf`) | Details |
+|---|---|
+| Lambda `claims-etl-transform` | Python 3.13, 2048 MB, 600 s timeout, 2 GB `/tmp`; dbt target `lambda`; dbt starts via `claims_etl.transform.dbt_cli` (threading locks: Lambda has no `/dev/shm`) |
+| Package | `build/transform_lambda.zip` (`build_lambda.py --transform`): dbt-core, dbt-duckdb, duckdb at the locally tested versions, the dbt project, and the DuckDB `httpfs` + `aws` extensions (nothing is downloaded at run time). 219 MiB unzipped (limit 250): the unused 275 MB dbt v2 parser binary is replaced by an empty placeholder wheel, and Babel's locale data is cut to English. 72 MB zipped, so it deploys through `s3://fredr-claims-artifacts-2026` |
+| Queue | `claims-etl-transform.fifo`, content-based deduplication (required: EventBridge sends no deduplication ID), visibility timeout 3600 s (6 × the function timeout; a failed build sets its own shorter backoff), DLQ `claims-etl-transform-dlq.fifo` (14 days) |
+| Rule | `source = claims-etl.ingestion`, `detail-type = FileIngested` → queue, message group `transform`; retries for 24 h, then the standard queue `claims-etl-transform-undelivered` (14 days) |
+| IAM | Read raw feed prefixes; read/write `_transform/*`; consume its queue; own log group. Ingestion gains `events:PutEvents` on the default bus, limited to its own source |
+
+## Pipeline alerts (GitHub issues, no email)
+
+Every failure ends up as a GitHub issue in this repo, through the same notifier Lambda,
+token and sanitizing as quarantine issues
+([`notifications/alerts.py`](src/claims_etl/notifications/alerts.py)). GitHub notifies
+the repo owner of new issues and comments, so a failure reaches you within a minute or two.
+
+```
+transform run report.json ──S3 trigger──► claims-etl-notify ──► issue / comment / close
+CloudWatch alarm (ALARM/OK) ──► SNS claims-etl-alerts ──► claims-etl-notify ──► issue / comment / close
+```
+
+- **Transform runs.** A `stopped` or `error` run opens an issue labeled `pipeline-alert`,
+  `transform` and `stopped` or `error`. The issue names the feeds the *failing* tests or
+  nodes read (traced through dbt's manifest to their sources), not every feed the run built:
+  a run that builds CMS and Humana but stops on a Humana test opens a `humana` issue. The
+  same problem in a later run adds a comment instead. A later `passed` or `warned` run that
+  built those feeds comments and closes it, so an open transform issue always means
+  "still broken".
+- **Alarms** cover failures that leave no report:
+
+  | Alarm | Fires when |
+  |---|---|
+  | `claims-etl-transform-dlq-not-empty` | a transform batch ran out of retries |
+  | `claims-etl-events-delivery-failed` | EventBridge failed to deliver a `FileIngested` event (the 2023-04 bug) |
+  | `claims-etl-events-undelivered` | EventBridge gave up after 24 h of retries |
+  | `claims-etl-ingest-errors` | ingestion raised (bad data is quarantined instead) |
+  | `claims-etl-transform-killed` | the transform Lambda timed out or ran out of memory (log metric filter) |
+
+  ALARM opens the alarm's issue (or comments on it); OK comments and closes it.
+- **Public-repo safe.** Issues carry run IDs, outcomes, feeds, months, file names, test
+  names and failure counts. Everything is whitelisted: names must look like identifiers,
+  the build exception keeps only its class name, and dbt error messages are never posted
+  (a SQL error can quote a data value). The issue links to the private report instead.
+- **Idempotent.** Each handled event leaves a record under `_tickets/alerts/`, so a
+  re-delivered S3 or SNS event makes no API calls.
+- **Not covered:** the notifier itself (its alarm would be delivered by the failing
+  function) and the GitHub token, which expires 2027-02-02. Both are in CLAUDE.md.
+
+## Tests
+
+```bash
+.venv/Scripts/python -m pytest      # 243 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest -m "not dbt"   # skip the ~4 min dbt end-to-end tests
+.venv/Scripts/python -m ruff check src tests
+```
+
+Fixture CSVs are built at test time, including deliberately broken ones: bad name (month 13,
+wrong CCLF number, re-download suffix), empty file, wrong/reordered/renamed header, UTF-8 BOM,
+ragged row, blank line, header only, empty or whitespace key, non-UTF-8 bytes, malformed quoting,
+and a headerless file whose first row must not reach a public issue.
+
+## Loaded so far
+
+On 2026-11-04 the S3 data from the first CMS load was deleted, because the root generator
+changed (it now coordinates CMS and Humana members). Both feeds are being re-landed month by
+month from 2023-01.
+
+All 216 currently generated files (seed 42) pass validation and reconcile locally against the
+real config:
+
+| Feed | File type | Files | Rows |
+|---|---|---|---|
+| CMS CCLF | `claims_header` / `claims_diagnosis` / `part_b_physician_lines` / `beneficiary_demographics` | 4 × 36 | 749 / 1,716 / 634 / 931 |
+| Humana MA | `member_eligibility` / `medical_claim_lines` | 2 × 36 | 861 / 602 |
+
+## Project layout
+
+```
+config/                     ingestion.yml, notifications.yml, transform.yml, file_types/*.yml
+src/claims_etl/ingestion/
+  pipeline.py               process_file orchestration
+  validation.py             runs checks in order
+  checks.py                 one function per check
+  csv_inspect.py            strict CSV reader, one-pass CSV profile
+  parquet_writer.py         CSV → Parquet (string columns + metadata)
+  s3_store.py               the only boto3 code (download, upload, move = copy→verify→delete)
+  manifest.py               idempotency records
+  log.py / utils.py          JSON-lines logging, checksum and time helpers (shared)
+  cli.py / lambda_handler.py
+src/claims_etl/s3_events.py S3 event parsing shared by both handlers (no pyarrow)
+src/claims_etl/notifications/alerts.py, alert_config.py
+                            transform reports + CloudWatch alarms -> GitHub issues
+src/claims_etl/events.py    FileIngested event (ingestion -> EventBridge -> transform)
+src/claims_etl/transform/
+  runner.py                 run_transform: select feeds, dbt build (subprocess), classify, publish
+  state.py                  DuckDB state file: S3 with ETag-conditional upload, or local
+  sinks.py                  run report + run_results.json (S3 or a local folder)
+  config.py                 transform.yml (state keys, feed -> dbt source)
+  cli.py / lambda_handler.py
+src/claims_etl/notifications/
+  notifier.py               notify_quarantine: create issue or comment, record result
+  content.py                title/body/comment + sanitizing (no tracker dependency)
+  github_client.py          GitHub REST: list/create/comment/labels, retries
+  ticket_record.py          _tickets/<sha256>.json
+  report.py                 typed, validated view of an .error.json
+  config.py                 notifications.yml (labels, title template, next steps)
+  settings.py               get_setting(): env locally, SSM in Lambda
+  cli.py / lambda_handler.py
+scripts/migrate_to_immutable_bronze.py  one-off: move pre-2026-11-05 objects to checksum keys
+scripts/build_lambda.py     Lambda packages: lambda.zip (ingest + notify), --transform
+infra/terraform/            main.tf (ingestion), notifier.tf, transform.tf, triggers, IAM, logs
+tests/                      pytest for ingestion + notifier; test_dbt_intermediate.py (dbt end to end)
+dbt/
+  dbt_project.yml, profiles.yml   DuckDB target, S3 via credential chain (no secrets)
+  models/staging/cclf/            _cclf__sources.yml, _cclf__models.yml, stg_cclf__*.sql
+  models/staging/humana/          _humana__sources.yml, _humana__models.yml, stg_humana__*.sql
+  models/intermediate/cclf/       int_cclf__beneficiary_versions, int_cclf__claim_families
+  models/intermediate/humana/     int_humana__member_versions, int_humana__claim_families
+  macros/                         generate_schema_name, incremental_by_affected_keys
+  tests/                          singular tests + generic unique_combination_of_columns
+```

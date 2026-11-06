@@ -59,7 +59,7 @@ dbt_packages/
 logs/
 profiles.yml
 # The project profile holds no secrets (AWS credential chain), so it is committed.
-!claims-lakehouse-dbt-duckdb/dbt/profiles.yml
+!dbt/profiles.yml
 
 # ---------------------------------------------------------------
 # Terraform
