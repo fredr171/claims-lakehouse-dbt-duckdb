@@ -489,8 +489,10 @@ CloudWatch alarm (ALARM/OK) ──► SNS claims-etl-alerts ──► claims-etl
 ```
 
 - **Transform runs.** A `stopped` or `error` run opens an issue labeled `pipeline-alert`,
-  `transform` and `stopped` or `error`. The same problem in a later run (same feeds, same
-  failing tests or nodes) adds a comment instead. A later `passed` or `warned` run that
+  `transform` and `stopped` or `error`. The issue names the feeds the *failing* tests or
+  nodes read (traced through dbt's manifest to their sources), not every feed the run built:
+  a run that builds CMS and Humana but stops on a Humana test opens a `humana` issue. The
+  same problem in a later run adds a comment instead. A later `passed` or `warned` run that
   built those feeds comments and closes it, so an open transform issue always means
   "still broken".
 - **Alarms** cover failures that leave no report:
@@ -516,7 +518,7 @@ CloudWatch alarm (ALARM/OK) ──► SNS claims-etl-alerts ──► claims-etl
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 240 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest      # 243 tests; no AWS or GitHub access (moto + responses)
 .venv/Scripts/python -m pytest -m "not dbt"   # skip the ~4 min dbt end-to-end tests
 .venv/Scripts/python -m ruff check src tests
 ```

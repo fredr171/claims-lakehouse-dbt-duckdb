@@ -119,7 +119,8 @@ class TransformRun:
 
     run_id: str
     outcome: str
-    feeds: tuple[str, ...]
+    feeds: tuple[str, ...]  # what the run BUILT (its selectors)
+    problem_feeds: tuple[str, ...]  # what the failing tests/nodes READ (the issue's feeds)
     months: tuple[str, ...]
     files: tuple[str, ...]
     stops: tuple[tuple[str, int | None], ...]  # (test name, failing rows)
@@ -139,6 +140,13 @@ class TransformRun:
             _safe(m.group(1), _IDENTIFIER)
             for s in data.get("selectors") or [] if (m := _FEED_SELECTOR.fullmatch(str(s)))
         })  # fmt: skip
+        failing = data.get("stops") if data.get("outcome") == "stopped" else data.get("errors")
+        node_feeds = {
+            _safe(f, _IDENTIFIER) for node in failing or [] for f in node.get("feeds") or []
+        }
+        # Reports from before the runner recorded node feeds (or a crash with no failing
+        # node) fall back to the feeds the run built.
+        problem_feeds = sorted(node_feeds & set(feeds)) or feeds
         exception = str(data.get("exception") or "")
         exception_type = exception.split(":", 1)[0].strip() if exception else None
         artifacts = data.get("artifacts") or {}
@@ -146,6 +154,7 @@ class TransformRun:
             run_id=_safe(data.get("run_id"), _RUN_ID),
             outcome=str(data.get("outcome") or ""),
             feeds=tuple(feeds),
+            problem_feeds=tuple(problem_feeds),
             months=tuple(sorted({_safe(m, _MONTH) for m in data.get("delivery_months") or []})),
             files=tuple(
                 sorted({_safe(t.get("file_name"), _FILE_NAME) for t in data.get("triggers") or []})
@@ -180,11 +189,14 @@ class TransformRun:
 
     @property
     def feed_label(self) -> str:
-        return "+".join(self.feeds) or "unknown"
+        """The feeds of the PROBLEM: a run can build cclf+humana and stop on a humana test."""
+        return "+".join(self.problem_feeds) or "unknown"
 
     @property
     def alert_key(self) -> str:
-        """Same problem -> same key: the feeds plus what failed (never the run or month)."""
+        """Same problem -> same key: the failing nodes' feeds plus what failed (never the run
+        or month). Keyed by the problem's feeds, so any later good run that builds those
+        feeds resolves it, even if it builds fewer feeds than the run that failed."""
         if self.outcome == "stopped":
             what = [name for name, _ in self.stops]
         else:
@@ -235,7 +247,8 @@ def _run_summary(run: TransformRun) -> list[str]:
         "|---|---|",
         f"| Run | {code(run.run_id, in_table=True)} |",
         f"| Outcome | {code(run.outcome, in_table=True)} |",
-        f"| Feeds | {', '.join(code(f, in_table=True) for f in run.feeds) or '`-`'} |",
+        f"| Feeds built | {', '.join(code(f, in_table=True) for f in run.feeds) or '`-`'} |",
+        f"| Problem in | {', '.join(code(f, in_table=True) for f in run.problem_feeds) or '`-`'} |",
         f"| Delivery months | {', '.join(code(m, in_table=True) for m in run.months) or '`-`'} |",
         f"| Triggering files | {', '.join(code(f, in_table=True) for f in run.files) or '`-`'} |",
         f"| Started / finished (UTC) | {code(run.started_at, in_table=True)} / "

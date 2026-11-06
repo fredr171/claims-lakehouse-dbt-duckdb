@@ -477,3 +477,21 @@ def test_transform_config_rejects_bad_backoff(config_dir: Path, value: Any) -> N
 
 def test_transform_config_reads_backoff(config_dir: Path) -> None:
     assert load_transform_config(config_dir).retry_backoff_seconds == (120, 300, 600)
+
+
+def test_node_feeds_walks_the_manifest_to_its_sources() -> None:
+    from claims_etl.transform.runner import node_feeds
+
+    manifest = {"parent_map": {
+        "test.p.not_null_stg_humana__x_mbi.1": ["model.p.stg_humana__x"],
+        "model.p.stg_humana__x": ["source.p.humana.member_eligibility",
+                                  "model.p.stg_humana__deliveries"],
+        "model.p.stg_humana__deliveries": ["source.p.humana.member_eligibility",
+                                           "source.p.humana.medical_claim_lines"],
+        "test.p.cross_feed": ["model.p.stg_humana__x", "model.p.stg_cclf__y"],
+        "model.p.stg_cclf__y": ["source.p.cclf.claims_header"],
+        "source.p.humana.member_eligibility": [],
+    }}  # fmt: skip
+    assert node_feeds(manifest, "test.p.not_null_stg_humana__x_mbi.1") == ["humana"]
+    assert node_feeds(manifest, "test.p.cross_feed") == ["cclf", "humana"]
+    assert node_feeds({}, "test.p.anything") == []
