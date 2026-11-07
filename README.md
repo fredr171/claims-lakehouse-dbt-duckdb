@@ -15,16 +15,23 @@ Terraform, dbt Core + DuckDB, pyarrow, pytest (moto, responses), ruff.
 
 ## Architecture
 
-```
- payer CSV ─► landing (S3) ─► ingest Lambda ─► raw / bronze (S3 Parquet, immutable)
-                  │               │                        │
-          quarantine + issue   FileIngested ─► EventBridge ─► SQS FIFO ─► transform Lambda
-                                                                           (dbt build)
-                                                                               │
-                              staging + intermediate / silver (DuckDB) ◄───────┘
-                              marts / gold (S3 Parquet)  ← next
+```mermaid
+flowchart LR
+    payer["Payer CSV<br/>monthly delivery"] --> landing[("Landing<br/>S3")]
+    landing --> ingest["Ingest Lambda<br/>validate, convert"]
+    ingest -->|valid| raw[("Raw / bronze<br/>S3 Parquet, immutable")]
+    ingest -->|invalid| quarantine[("Quarantine<br/>S3 + error report")]
+    ingest -->|FileIngested| eb["EventBridge"]
+    eb --> sqs["SQS FIFO<br/>one build at a time"]
+    sqs --> transform["Transform Lambda<br/>dbt build"]
+    raw --> transform
+    transform --> silver[("Staging + intermediate / silver<br/>DuckDB")]
+    silver -.->|planned| marts[("Marts / gold<br/>S3 Parquet")]
 
- failures (quarantine, stopped/errored builds, CloudWatch alarms) ─► notifier Lambda ─► GitHub issues
+    quarantine --> notifier["Notifier Lambda"]
+    transform -->|run report| notifier
+    alarms["CloudWatch alarms"] --> sns["SNS"] --> notifier
+    notifier --> issues["GitHub issues<br/>open, comment, close"]
 ```
 
 | Layer | Where | What it holds |
