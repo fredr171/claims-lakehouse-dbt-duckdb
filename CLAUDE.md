@@ -418,7 +418,9 @@ ticket result recorded.
 - Small, readable functions with type hints and docstrings.
 - Log what each step does (file processed, row counts, duration).
 - Every new transformation gets at least one test.
-- Update README.md when the architecture changes.
+- Update docs when the architecture changes: README.md is a short overview for reviewers
+  (themes, layers, key decisions, tests; keep it skimmable), docs/pipeline-details.md is the
+  full reference (checks, models, resources, commands).
 
 ## Current status
 
