@@ -331,7 +331,31 @@ ticket result recorded.
   tests/test_dbt_intermediate.py and run the dbt tests. Data already in S3 came from v1.0.0.
 - Files to land come from that repo's committed `output/` (the user uploads them).
 
-## Event-driven transforms (raw -> staging + intermediate)
+## Marts (gold, `dbt/models/marts/`, schema `marts`)
+
+- Payer-agnostic: dim_payer, dim_member (person by MBI across payers), fct_claims,
+  fct_member_months, agg_payer_monthly (PMPM). NEVER reference a payer's feed models from a
+  mart; marts read only `union_conformed('<coverage|claims>')` and other marts
+  (macros/payers.sql).
+- Payer registry = the `payers` var in dbt_project.yml (the only place marts learn about
+  payers). Each payer provides `int_<src>__conformed_coverage` and `_claims` views with the
+  ENFORCED contract in models/intermediate/_conformed__models.yml (columns defined once via
+  YAML anchors); payer code mapping lives only in those views, which are `enabled` only
+  while the payer is registered. Onboard = conformed views + registry entry; retire =
+  `retired_month` (history kept, WARN on later files); offboard = remove the entry.
+  `built_payer_relations` leaves out a registered payer that has not built yet.
+- Materialized `external`: one Parquet file per mart under the profile `external_root`
+  (env CLAIMS_MARTS_ROOT). Marts follow the STATE they were built from: S3 state ->
+  `marts_root` in config/transform.yml (s3://fredr-claims-marts-2026; must match the Terraform
+  `marts_bucket`); a local state file -> `<state>_marts/` next to it; plain local dbt ->
+  dbt/marts_local/ (gitignored). Only the transform Lambda (or claims-transform on the S3
+  state) writes the marts bucket.
+- No names, addresses or full birth dates in marts (birth_year only).
+- Tests: keys/grain + relationships + `assert_marts_reconcile` are STOP; orphan claims and
+  late files from a retired payer are WARN (scoped). Answer-key checks in
+  tests/test_dbt_intermediate.py, isolation + lifecycle in tests/test_dbt_gating.py.
+
+## Event-driven transforms (raw -> staging + intermediate + marts)
 
 - Ingestion publishes `FileIngested` (claims_etl/events.py) to the default EventBridge bus
   for every file in raw (success AND skipped_duplicate, `redelivered: true`), after the
@@ -345,6 +369,8 @@ ticket result recorded.
   go to the standard queue `claims-etl-transform-undelivered` (rule target DLQ).
 - The runner (claims_etl/transform/runner.py) builds the WHOLE FEED (`source:<cclf|humana>+`),
   never one file type: a stop in CCLF5 must still block claim families when CCLF1 arrives.
+  ONE dbt PASS PER FEED (in order), so a stop in one payer never freezes the marts for the
+  others; results merge by node and a later `skipped` never replaces an earlier result.
   `delivery_months` = the events' months (WARN scoping only). dbt runs as a SUBPROCESS
   (process exit closes and checkpoints DuckDB; no dbt state in a warm Lambda) via
   `python -m claims_etl.transform.dbt_cli`, never `dbt.cli.main` directly: Lambda has no
@@ -500,5 +526,6 @@ ticket result recorded.
       (v1.0.0, history filtered to its files; seed-42 output byte-identical). This repo: the
       lakehouse moved from claims-lakehouse-dbt-duckdb/ to the root (git history kept, no
       rewrite); dev extra pins synthetic-payer-files@v1.0.0
-- [ ] Marts to s3://fredr-claims-marts-2026 (external materialization)
+- [ ] 2026-11-07: marts (5 payer-agnostic marts, payer registry + conformed contract, one dbt
+      pass per feed, transform IAM on the marts bucket) built on branch marts; not deployed
 - [ ] Move Terraform state to an S3 backend before CI

@@ -38,6 +38,7 @@ INTERMEDIATE = [
     "int_humana__member_versions",
     "int_humana__claim_families",
 ]
+MARTS = ["dim_payer", "dim_member", "fct_claims", "fct_member_months", "agg_payer_monthly"]
 FIXED_INGESTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 HAS_DBT = importlib.util.find_spec("synthetic_payer_files") is not None and DBT.is_file()
@@ -166,6 +167,8 @@ def _dbt(
     }
     env.update(
         CLAIMS_DUCKDB_PATH=str(db),
+        # Marts Parquet next to the database it belongs to (mart views point at these files).
+        CLAIMS_MARTS_ROOT=marts_dir(db).as_posix(),
         # Dummy credentials: the profile creates an S3 secret, but nothing reads S3.
         AWS_ACCESS_KEY_ID="testing",
         AWS_SECRET_ACCESS_KEY="testing",
@@ -173,6 +176,7 @@ def _dbt(
         DBT_SEND_ANONYMOUS_USAGE_STATS="false",
         PYTHONIOENCODING="utf-8",
     )
+    marts_dir(db).mkdir(parents=True, exist_ok=True)  # DuckDB does not create folders
     dbt_vars = {
         "cclf_raw_root": (raw / "cms" / "cclf").as_posix(),
         "humana_raw_root": (raw / "humana" / "ma").as_posix(),
@@ -195,18 +199,24 @@ def _dbt(
     return DbtRun(result.returncode, result.stdout[-4000:], statuses)
 
 
+def marts_dir(db: Path) -> Path:
+    """Where a build into `db` writes its marts Parquet (one file per mart)."""
+    return db.parent / f"{db.stem}_marts"
+
+
 def _query(db: Path, sql: str) -> list[tuple]:
     with duckdb.connect(str(db), read_only=True) as con:
         return con.execute(sql).fetchall()
 
 
 def _assert_same_intermediate(db_a: Path, db_b: Path) -> None:
-    """Both databases hold identical intermediate tables (row for row)."""
+    """Both databases hold identical intermediate tables and marts (row for row)."""
     with duckdb.connect() as con:
         con.execute(f"ATTACH '{db_a.as_posix()}' AS a (READ_ONLY)")
         con.execute(f"ATTACH '{db_b.as_posix()}' AS b (READ_ONLY)")
-        for table in INTERMEDIATE:
-            a, b = f"a.intermediate.{table}", f"b.intermediate.{table}"
+        tables = [f"intermediate.{t}" for t in INTERMEDIATE] + [f"marts.{t}" for t in MARTS]
+        for table in tables:
+            a, b = f"a.{table}", f"b.{table}"
             counts = con.execute(f"select (select count(*) from {a}), (select count(*) from {b})")
             n_a, n_b = counts.fetchone()
             only_a = con.execute(f"select count(*) from (from {a} except all from {b})").fetchone()

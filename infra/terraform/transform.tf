@@ -213,6 +213,20 @@ data "aws_iam_policy_document" "transform" {
     resources = ["${local.raw_arn}/_transform/*"]
   }
 
+  # Marts (gold): dbt-duckdb writes one Parquet file per mart, then reads it back for the
+  # DuckDB view over it (config/transform.yml marts_root; dbt/models/marts).
+  statement {
+    sid       = "ListMartsBucket"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.marts_bucket}"]
+  }
+
+  statement {
+    sid       = "ReadWriteMarts"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = ["arn:aws:s3:::${var.marts_bucket}/*"]
+  }
+
   statement {
     sid = "ConsumeTransformQueue"
     actions = [
@@ -239,7 +253,7 @@ resource "aws_iam_role_policy" "transform" {
 
 resource "aws_lambda_function" "transform" {
   function_name    = local.transform_name
-  description      = "FileIngested -> dbt build of staging + intermediate (claims-etl)"
+  description      = "FileIngested -> dbt build of staging, intermediate and marts (claims-etl)"
   role             = aws_iam_role.transform.arn
   runtime          = "python3.13"
   architectures    = ["x86_64"] # the bundled DuckDB extensions are linux_amd64

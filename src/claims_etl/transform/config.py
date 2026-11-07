@@ -24,6 +24,7 @@ class TransformConfig:
     runs_prefix: str
     dbt_target: str
     feed_sources: dict[str, str]  # landing prefix -> dbt source name
+    marts_root: str  # where dbt publishes the marts for the S3 state
     # Delay before a failed batch is retried, by receive count (1st failure, 2nd, ...);
     # the last value repeats. See transform/lambda_handler.py.
     retry_backoff_seconds: tuple[int, ...] = DEFAULT_RETRY_BACKOFF_SECONDS
@@ -75,5 +76,6 @@ def load_transform_config(config_dir: Path | str | None = None) -> TransformConf
         runs_prefix=settings["runs_prefix"],
         dbt_target=os.environ.get(TARGET_ENV_VAR) or settings.get("dbt_target", "dev"),
         feed_sources=dict(feeds),
+        marts_root=str(settings["marts_root"]).rstrip("/"),
         retry_backoff_seconds=tuple(backoff),
     )

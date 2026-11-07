@@ -205,14 +205,14 @@ def stub_dbt(monkeypatch: pytest.MonkeyPatch):
     calls: list[dict] = []
 
     def install(results: dict | Exception):
-        def fake(report, db: Path, work: Path, extra_vars: dict) -> dict:
-            calls.append({"selectors": report.selectors, "months": report.delivery_months,
-                          "vars": extra_vars})  # fmt: skip
+        def fake(report, db: Path, target: Path, extra_vars: dict, selector: str) -> dict:
+            calls.append({"selectors": report.selectors, "selector": selector,
+                          "months": report.delivery_months, "vars": extra_vars})  # fmt: skip
             if isinstance(results, Exception):
                 raise results
             db.write_bytes(b"built-" + report.run_id.encode())
-            (work / "target").mkdir()
-            (work / "target" / "run_results.json").write_text(json.dumps(results))
+            target.mkdir()
+            (target / "run_results.json").write_text(json.dumps(results))
             return results
 
         monkeypatch.setattr(runner, "_dbt_build", fake)
@@ -495,3 +495,51 @@ def test_node_feeds_walks_the_manifest_to_its_sources() -> None:
     assert node_feeds(manifest, "test.p.not_null_stg_humana__x_mbi.1") == ["humana"]
     assert node_feeds(manifest, "test.p.cross_feed") == ["cclf", "humana"]
     assert node_feeds({}, "test.p.anything") == []
+
+
+def test_one_dbt_pass_per_feed_and_a_later_skip_never_hides_a_built_mart(
+    monkeypatch, tmp_path
+) -> None:
+    """CMS rebuilds the marts; the Humana pass then stops and skips them. The marts were
+    built (the CMS pass), so the report must not list them as skipped."""
+    mart = "model.claims_lakehouse.fct_claims"
+    humana_stop = "test.claims_lakehouse.not_null_stg_humana__x_mbi.1"
+    per_selector = {
+        "source:cclf+": _results((MODEL, "success"), (mart, "success")),
+        "source:humana+": _results((humana_stop, "fail"), (mart, "skipped")),
+    }
+    selectors: list[str] = []
+
+    def fake(report, db: Path, target: Path, extra_vars: dict, selector: str) -> dict:
+        selectors.append(selector)
+        db.write_bytes(b"built")
+        return per_selector[selector]
+
+    monkeypatch.setattr(runner, "_dbt_build", fake)
+    report = run_transform(
+        [_event("humana/ma/"), _event("cms/cclf/")], config=_tconfig(tmp_path),
+        state=LocalStateStore(tmp_path / "state.duckdb"),
+        sink=LocalRunSink(tmp_path / "runs", "r"), run_id="r",
+    )  # fmt: skip
+    assert selectors == ["source:cclf+", "source:humana+"]  # one pass per feed, in order
+    assert report.outcome is Outcome.STOPPED and report.published
+    assert mart not in report.skipped
+    assert [s["name"] for s in report.stops] == ["not_null_stg_humana__x_mbi"]
+    saved = json.loads((tmp_path / "runs/r/run_results.json").read_text())
+    assert {r["unique_id"]: r["status"] for r in saved["results"]}[mart] == "success"
+
+
+def test_marts_follow_the_state(tmp_path, monkeypatch) -> None:
+    """Mart views in the state point at Parquet files, so the marts must live where the
+    state lives: the marts bucket for the S3 state, a folder next to a local state file
+    (never the run's temporary working copy)."""
+    from claims_etl.transform.runner import marts_root_for
+
+    config = _tconfig(tmp_path)
+    monkeypatch.delenv("CLAIMS_MARTS_ROOT", raising=False)
+    local = marts_root_for(LocalStateStore(tmp_path / "state" / "lake.duckdb"), config)
+    assert Path(local) == tmp_path / "state" / "lake_marts" and Path(local).is_dir()
+    s3_state = S3StateStore(object(), "raw", "_transform/state/x.duckdb", "_transform/b.duckdb")
+    assert marts_root_for(s3_state, config) == "s3://fredr-claims-marts-2026"
+    monkeypatch.setenv("CLAIMS_MARTS_ROOT", "s3://elsewhere")
+    assert marts_root_for(s3_state, config) == "s3://elsewhere"

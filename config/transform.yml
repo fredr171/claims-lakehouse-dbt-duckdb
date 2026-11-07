@@ -9,6 +9,9 @@
 state_key: _transform/state/claims_lakehouse.duckdb           # in the raw bucket
 backup_key: _transform/state/claims_lakehouse.previous.duckdb  # copy of the state before each upload
 runs_prefix: _transform/runs/                                  # <run_id>/report.json + run_results.json
+# Gold Parquet published with the S3 state (one file per mart). A local state file
+# (claims-transform --db) gets its marts in a <state>_marts/ folder next to it instead.
+marts_root: s3://fredr-claims-marts-2026
 
 # Landing feed prefix -> dbt source name (dbt/models/staging/<source>/).
 feeds:

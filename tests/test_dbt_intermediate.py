@@ -414,6 +414,63 @@ def test_humana_totals_match_summary(generated, full_build) -> None:
     assert members == summary["members"]
 
 
+# --- 1c. marts (gold) vs both answer keys ----------------------------------------------
+
+
+def test_marts_net_paid_by_service_month_matches_both_answer_keys(generated, full_build) -> None:
+    for payer_id, key_file in [("cms_ffs", "net_paid_by_service_month.csv"),
+                               ("humana_ma", "humana/net_paid_by_service_month.csv")]:  # fmt: skip
+        expected = {r["service_month"]: Decimal(r["total_net_paid"])
+                    for r in _read_key(generated, key_file)}  # fmt: skip
+        rows = _query(
+            full_build,
+            "select strftime(service_month, '%Y-%m'), sum(net_paid_amount) from marts.fct_claims"
+            f" where payer_id = '{payer_id}' group by 1",
+        )
+        actual = {month: amount for month, amount in rows if amount != 0 or month in expected}
+        assert actual == expected, payer_id
+        summary = _query(full_build, "select sum(net_paid_amount) from marts.agg_payer_monthly"
+                                     f" where payer_id = '{payer_id}'")  # fmt: skip
+        assert summary == [(sum(expected.values()),)]
+
+
+def test_marts_member_dimension_matches_the_crossover_answer_key(generated, full_build) -> None:
+    """dim_member is one row per person across payers: the payer switchers in
+    crossover_members.csv are exactly the multi-payer members, each with one more coverage
+    span than switches, currently covered by the payer of their last switch."""
+    switches: dict[str, list[dict]] = {}
+    for row in sorted(_read_key(generated, "crossover_members.csv"),
+                      key=lambda r: r["effective_date"]):  # fmt: skip
+        switches.setdefault(row["BENE_MBI_ID"], []).append(row)
+    rows = _query(full_build, "select member_key, coverage_span_count, current_payer_id"
+                              " from marts.dim_member where is_multi_payer")  # fmt: skip
+    expected = {
+        mbi: (len(rows_) + 1, "humana_ma" if rows_[-1]["direction"] == "FFS_TO_MA" else "cms_ffs")
+        for mbi, rows_ in switches.items()
+    }
+    assert {mbi: (spans, payer) for mbi, spans, payer in rows} == expected
+    assert _query(full_build, "select count(*) = count(distinct member_key) from marts.dim_member")[
+        0
+    ] == (True,)
+
+
+def test_marts_member_months_in_the_last_month_match_final_members(generated, full_build) -> None:
+    """Members covered on any day of 2025-12 (start, end and death from the answer keys)."""
+
+    def covered(start: str, end: str, death: str) -> bool:
+        return bool(start) and start <= "2025-12-31" and (not end or end >= "2025-12-01") and (
+            not death or death >= "2025-12-01")  # fmt: skip
+
+    cms = sum(covered(r["BENE_RNG_BGN_DT"], r["BENE_RNG_END_DT"], r["BENE_DEATH_DT"])
+              for r in _read_key(generated, "final_members.csv"))  # fmt: skip
+    humana = sum(covered(r["ENROLLMENT_START_DT"], r["ENROLLMENT_END_DT"], r["DEATH_DT"])
+                 for r in _read_key(generated, "humana/final_members.csv"))  # fmt: skip
+    rows = _query(full_build, "select payer_id, count(*) from marts.fct_member_months"
+                              " where month = date '2025-12-01' group by 1 order by 1")  # fmt: skip
+    assert rows == [("cms_ffs", cms), ("humana_ma", humana)]
+    assert cms > 0 and humana > 0
+
+
 # --- 2 + 3. incremental runs equal a full refresh ---------------------------------------
 
 

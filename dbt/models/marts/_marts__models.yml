@@ -1,0 +1,100 @@
+version: 2
+
+# Gold: payer-agnostic marts built only from the conformed contract (macros/payers.sql) and
+# the payer registry. Rebuilt in full on every run and published as Parquet (one file per
+# mart) under the profile's external_root. No names, addresses or full birth dates.
+# Tests are STOP unless marked `config: *warn` (macros/test_scoping.sql).
+
+models:
+  - name: dim_payer
+    description: "One row per registered payer, with status and delivery window."
+    columns:
+      - name: payer_id
+        data_tests: [unique, not_null]
+      - name: payer_status
+        description: "active, retired (registry retired_month set) or awaiting_data (no file built yet)."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["active", "retired", "awaiting_data"]
+      - name: first_delivery_month
+        description: "Earliest current delivery; with last_delivery_month, bounds member months."
+      - name: last_delivery_month
+
+  - name: dim_member
+    description: "One row per person across payers (keyed by MBI); attributes from the latest span."
+    columns:
+      - name: member_key
+        description: "MBI: the cross-payer person key."
+        data_tests: [unique, not_null]
+      - name: current_payer_id
+        description: "Active payer of the latest open coverage span; NULL if none."
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_payer')
+                field: payer_id
+      - name: payer_count
+        description: "Payers the person has had coverage with (2+ = switched between FFS and MA)."
+      - name: is_multi_payer
+      - name: coverage_span_count
+
+  - name: fct_claims
+    description: "One row per claim family across payers, net of reversals and adjustments."
+    columns:
+      - name: claim_key
+        description: "<payer_id>:<payer_claim_id>, unique across payers."
+        data_tests: [unique, not_null]
+      - name: payer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_payer')
+                field: payer_id
+      - name: member_key
+        description: "Joins dim_member (assert_claim_members_in_dim_member warns on orphans)."
+        data_tests: [not_null]
+      - name: claim_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["PAID", "ADJUSTED", "VOIDED", "DENIED"]
+      - name: service_month
+        data_tests: [not_null]
+      - name: net_paid_amount
+        data_tests: [not_null]
+
+  - name: fct_member_months
+    description: "One row per member per payer per covered month (PMPM denominator)."
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [payer_id, member_key, month]
+    columns:
+      - name: payer_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_payer')
+                field: payer_id
+      - name: member_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_member')
+                field: member_key
+      - name: month
+        data_tests: [not_null]
+
+  - name: agg_payer_monthly
+    description: "Per payer per month: member months, claims and net paid by service month, PMPM."
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [payer_id, month]
+    columns:
+      - name: pmpm_net_paid
+        description: "net_paid_amount / member_months; NULL where there are no member months."

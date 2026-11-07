@@ -55,6 +55,9 @@ htmlcov/
 # dbt
 # ---------------------------------------------------------------
 target/
+# Local marts Parquet (dbt/profiles.yml dev external_root); the folder itself is kept.
+marts_local/*
+!marts_local/.gitkeep
 dbt_packages/
 logs/
 profiles.yml
