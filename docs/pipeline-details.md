@@ -19,7 +19,7 @@ No real claims, PHI, or PII are used anywhere.
 
 ```
 landing (S3, .csv)  ──►  raw / bronze (S3, Parquet)  ──►  staging + intermediate / silver (DuckDB via dbt)  ──►  marts / gold (S3, Parquet)
-   └── ingestion (Python, Lambda) ──┘                        └──────── dbt-duckdb (staging + intermediate built; next: marts) ────────┘
+   └── ingestion (Python, Lambda) ──┘                        └──────── dbt-duckdb (staging + intermediate + marts) ────────┘
                                   └── FileIngested event ──► transform Lambda (dbt build per feed)
 ```
 
@@ -329,6 +329,64 @@ into a local raw folder, and runs dbt against it. Checks:
 The test was shown to fail when the vanished-file cleanup is removed. Skip it with
 `pytest -m "not dbt"`.
 
+## Marts (gold): payer-agnostic
+
+The marts know nothing about any payer. They are built from two things only:
+
+- **The payer registry** (`payers` in [`dbt/dbt_project.yml`](../dbt/dbt_project.yml)):
+  `payer_id`, name, line of business, `dbt_source` (the feed's dbt source),
+  `onboarded_month`, `retired_month`. Validated on parse
+  ([`macros/payers.sql`](../dbt/macros/payers.sql)): unique snake_case ids and sources,
+  `YYYY-MM` months.
+- **The conformed contract**: every registered payer provides two views,
+  `int_<src>__conformed_coverage` (one row per coverage span) and
+  `int_<src>__conformed_claims` (one row per claim family). Their columns and types are
+  written once in [`_conformed__models.yml`](../dbt/models/intermediate/_conformed__models.yml)
+  (YAML anchors) and enforced by dbt (`contract: enforced`): a view with a missing, extra or
+  mistyped column does not build. Payer-specific mapping happens in these views only:
+
+  | Concept | CMS FFS (CCLF) | Humana MA |
+  |---|---|---|
+  | member id | MBI | `MEMBER_ID` |
+  | coverage span | `BENE_RNG_BGN_DT`/`END_DT`, latest delivered row per start date | enrollment start/end, latest row per start date |
+  | sex | `1`/`2` → `M`/`F` | `M`/`F` |
+  | dual | `BENE_DUAL_STUS_CD` ≠ `NA` | `DUAL_FLAG = Y` |
+  | claim category | Part A / B → institutional / professional | form `I` / `P` |
+  | claim status | `ORIGINAL`/`ADJUSTED`/`CANCELLED` → `PAID`/`ADJUSTED`/`VOIDED` | `ORIGINAL`/`REPLACED`/`VOIDED`/`DENIED` → `PAID`/`ADJUSTED`/`VOIDED`/`DENIED` |
+
+  Coverage ends at death when that comes first.
+
+| Mart (schema `marts`) | Grain | Notes |
+|---|---|---|
+| `dim_payer` | registered payer | status `active` / `retired` / `awaiting_data`, delivery window (first/last current delivery) |
+| `dim_member` | person, keyed by MBI | attributes from the latest span (birth year, sex, state, dual, deceased); current payer = active payer of the latest open span; `payer_count`, `is_multi_payer`, span count |
+| `fct_claims` | claim family | `claim_key` = `<payer_id>:<claim id>`; normalized status and category; net paid after reversals and adjustments |
+| `fct_member_months` | payer × member × month | covered on any day of the month, within the payer's delivery window |
+| `agg_payer_monthly` | payer × month | member months, non-voided claims and net paid by service month, PMPM |
+
+All five are rebuilt in full on every run (dbt-duckdb `external` materialization: one Parquet
+file per mart under the profile's `external_root`, plus a DuckDB view over it). Gold is small
+and derived, so a full rebuild is always consistent with intermediate. No names, addresses or
+full birth dates reach the marts.
+
+**Payer lifecycle** (registry only; the marts' SQL never changes):
+
+- **Onboard:** ingestion config + staging + intermediate for the feed, its two conformed
+  views (two entries in `_conformed__models.yml`), and a registry entry. A registered payer
+  with nothing built yet shows as `awaiting_data` and is left out of the unions instead of
+  failing the other payers' marts.
+- **Retire:** set `retired_month`. History stays in every mart; its members no longer count
+  as currently covered; member months end at its last delivery. A file delivered after the
+  retirement month raises a WARN (`assert_no_deliveries_after_payer_retirement`).
+- **Offboard:** remove the entry. Its conformed views are disabled (`enabled` follows the
+  registry) and it drops out of every mart; its staging and intermediate history stays.
+
+**Tests:** keys and grain on every mart, relationships to `dim_payer` and `dim_member`, a STOP
+reconciliation (`assert_marts_reconcile`: the summary adds up to the facts per payer) and a
+WARN for claims whose member has no coverage anywhere. `test_dbt_intermediate.py` checks the
+marts against both answer keys (net paid by service month, the 17 payer switchers, member
+months in the last month); `test_dbt_gating.py` checks payer isolation and the lifecycle.
+
 ## Running it
 
 ```bash
@@ -416,7 +474,7 @@ terraform plan -out=tfplan && terraform apply tfplan
 
 Terraform state is local (gitignored). Move it to an S3 backend before CI or anyone else runs it.
 
-## Event-driven transforms (staging + intermediate)
+## Event-driven transforms (staging + intermediate + marts)
 
 Every file that ingestion puts in raw triggers a dbt build of its feed, with no schedule:
 
@@ -439,7 +497,13 @@ claims-etl-ingest ──FileIngested──► EventBridge rule ──► SQS FIF
    `source:cclf.claims_header+` the CCLF5 stop tests would not run, and the bad lines would
    flow in (`test_dbt_gating.py` checks this). `delivery_months` is set to the events' months,
    so only the WARN tests are scoped (see [Stop vs warn](#stop-vs-warn)). dbt runs in a
-   subprocess against a **working copy** of the DuckDB state file.
+   subprocess against a **working copy** of the DuckDB state file, **one pass per feed**
+   (in order). The marts are downstream of every feed, so each pass rebuilds them: a stop in
+   Humana skips the marts in the Humana pass, but the CMS pass already rebuilt them from
+   CMS's new data and Humana's last good state. Results are merged by node, and a later
+   `skipped` never hides an earlier result that ran. The marts follow the state: the S3 state
+   publishes them to `marts_root` in `config/transform.yml` (the marts bucket), a local state
+   file (`--db`) gets a `<state>_marts/` folder next to it.
 4. **Outcome.** The runner reads `run_results.json` and records one of four outcomes:
 
    | Outcome | Meaning | State | Queue |
@@ -482,7 +546,7 @@ Exit codes: 0 = passed or warned, 2 = stopped, 1 = error.
 | Package | `build/transform_lambda.zip` (`build_lambda.py --transform`): dbt-core, dbt-duckdb, duckdb at the locally tested versions, the dbt project, and the DuckDB `httpfs` + `aws` extensions (nothing is downloaded at run time). 219 MiB unzipped (limit 250): the unused 275 MB dbt v2 parser binary is replaced by an empty placeholder wheel, and Babel's locale data is cut to English. 72 MB zipped, so it deploys through `s3://fredr-claims-artifacts-2026` |
 | Queue | `claims-etl-transform.fifo`, content-based deduplication (required: EventBridge sends no deduplication ID), visibility timeout 3600 s (6 × the function timeout; a failed build sets its own shorter backoff), DLQ `claims-etl-transform-dlq.fifo` (14 days) |
 | Rule | `source = claims-etl.ingestion`, `detail-type = FileIngested` → queue, message group `transform`; retries for 24 h, then the standard queue `claims-etl-transform-undelivered` (14 days) |
-| IAM | Read raw feed prefixes; read/write `_transform/*`; consume its queue; own log group. Ingestion gains `events:PutEvents` on the default bus, limited to its own source |
+| IAM | Read raw feed prefixes; read/write `_transform/*`; list/read/write the marts bucket; consume its queue; own log group. Ingestion gains `events:PutEvents` on the default bus, limited to its own source |
 
 ## Pipeline alerts (GitHub issues, no email)
 
@@ -526,8 +590,8 @@ CloudWatch alarm (ALARM/OK) ──► SNS claims-etl-alerts ──► claims-etl
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 243 tests; no AWS or GitHub access (moto + responses)
-.venv/Scripts/python -m pytest -m "not dbt"   # skip the ~4 min dbt end-to-end tests
+.venv/Scripts/python -m pytest      # 250 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest -m "not dbt"   # skip the ~30 min dbt end-to-end tests
 .venv/Scripts/python -m ruff check src tests
 ```
 
@@ -591,6 +655,8 @@ dbt/
   models/staging/humana/          _humana__sources.yml, _humana__models.yml, stg_humana__*.sql
   models/intermediate/cclf/       int_cclf__beneficiary_versions, int_cclf__claim_families
   models/intermediate/humana/     int_humana__member_versions, int_humana__claim_families
-  macros/                         generate_schema_name, incremental_by_affected_keys
+  models/intermediate/*/          int_<src>__conformed_coverage / _claims (+ _conformed__models.yml)
+  models/marts/                   dim_payer, dim_member, fct_claims, fct_member_months, agg_payer_monthly
+  macros/                         generate_schema_name, incremental_by_affected_keys, payers
   tests/                          singular tests + generic unique_combination_of_columns
 ```

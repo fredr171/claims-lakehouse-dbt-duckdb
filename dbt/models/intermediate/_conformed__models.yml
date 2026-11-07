@@ -1,0 +1,136 @@
+version: 2
+
+# The conformed contract: what every registered payer (dbt_project.yml `payers`) must provide
+# for the marts. The columns are defined ONCE, on the first payer's views (YAML anchors), and
+# reused for every other payer, so a new payer is two entries here:
+#
+#   - name: int_<src>__conformed_coverage
+#     config: {contract: {enforced: true}}
+#     data_tests: *coverage_tests
+#     columns: *coverage_columns
+#   - name: int_<src>__conformed_claims
+#     config: {contract: {enforced: true}}
+#     data_tests: *claims_tests
+#     columns: *claims_columns
+#
+# `contract: enforced` makes dbt refuse to build a view whose column names or types differ.
+# All tests here are STOP: the marts read these views directly.
+
+models:
+  - name: int_cclf__conformed_coverage
+    description: "CMS FFS coverage spans in the conformed contract (one row per span)."
+    config: {contract: {enforced: true}}
+    data_tests: &coverage_tests
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [payer_member_id, coverage_start_date]
+    columns: &coverage_columns
+      - name: payer_id
+        data_type: varchar
+        description: "Registered payer_id (dbt_project.yml payers)."
+        data_tests: [not_null]
+      - name: payer_member_id
+        data_type: varchar
+        description: "The payer's own member identifier (CMS: MBI; Humana: MEMBER_ID)."
+        data_tests: [not_null]
+      - name: beneficiary_mbi
+        data_type: varchar
+        description: "Medicare Beneficiary Identifier: the person's identity across payers."
+        data_tests: [not_null]
+      - name: coverage_start_date
+        data_type: date
+        data_tests: [not_null]
+      - name: coverage_end_date
+        data_type: date
+        description: "Last covered day (inclusive), capped at death; NULL while open."
+      - name: plan_code
+        data_type: varchar
+        description: "Plan within the payer (MEDICARE_FFS, or contract-PBP for MA)."
+      - name: birth_year
+        data_type: integer
+        description: "Year only: full birth dates stay in staging."
+      - name: sex
+        data_type: varchar
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["M", "F", "U"]
+      - name: state_code
+        data_type: varchar
+      - name: is_dual
+        data_type: boolean
+        description: "Dual-eligible for Medicare and Medicaid."
+      - name: is_deceased
+        data_type: boolean
+      - name: last_delivery_month
+        data_type: date
+        description: "Delivery month of the row the span's values come from."
+        data_tests: [not_null]
+
+  - name: int_humana__conformed_coverage
+    description: "Humana MA enrollment spans in the conformed contract (one row per span)."
+    config: {contract: {enforced: true}}
+    data_tests: *coverage_tests
+    columns: *coverage_columns
+
+  - name: int_cclf__conformed_claims
+    description: "CMS FFS claim families in the conformed contract."
+    config: {contract: {enforced: true}}
+    data_tests: &claims_tests
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [payer_claim_id]
+    columns: &claims_columns
+      - name: payer_id
+        data_type: varchar
+        data_tests: [not_null]
+      - name: payer_claim_id
+        data_type: varchar
+        description: "The payer's claim family key (unique within the payer)."
+        data_tests: [not_null]
+      - name: payer_member_id
+        data_type: varchar
+        data_tests: [not_null]
+      - name: beneficiary_mbi
+        data_type: varchar
+        data_tests: [not_null]
+      - name: claim_category
+        data_type: varchar
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["INSTITUTIONAL", "PROFESSIONAL"]
+      - name: payer_claim_status
+        data_type: varchar
+        description: "The payer's own family status, kept for traceability."
+      - name: claim_status
+        data_type: varchar
+        description: "Normalized: PAID, ADJUSTED, VOIDED or DENIED."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["PAID", "ADJUSTED", "VOIDED", "DENIED"]
+      - name: service_start_date
+        data_type: date
+      - name: service_month
+        data_type: date
+        data_tests: [not_null]
+      - name: first_delivery_month
+        data_type: date
+      - name: latest_delivery_month
+        data_type: date
+      - name: net_paid_amount
+        data_type: decimal(18,2)
+        description: "Net paid after reversals and adjustments (the family's current amount)."
+        data_tests: [not_null]
+      - name: is_capitated
+        data_type: boolean
+        data_tests: [not_null]
+
+  - name: int_humana__conformed_claims
+    description: "Humana MA claim families in the conformed contract."
+    config: {contract: {enforced: true}}
+    data_tests: *claims_tests
+    columns: *claims_columns

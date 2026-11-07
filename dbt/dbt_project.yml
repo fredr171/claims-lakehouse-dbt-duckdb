@@ -1,4 +1,5 @@
-# dbt project: raw CCLF Parquet in S3 -> staging (silver) in DuckDB.
+# dbt project: raw Parquet in S3 -> staging + intermediate (silver) in DuckDB -> marts (gold)
+# as Parquet in the marts bucket.
 # Run every dbt command from this folder (profiles.yml and the .duckdb file live here).
 name: claims_lakehouse
 version: "0.1.0"
@@ -17,6 +18,30 @@ vars:
   cclf_raw_root: s3://fredr-claims-raw-2026/cms/cclf
   humana_raw_root: s3://fredr-claims-raw-2026/humana/ma
 
+  # Payer registry: the ONLY place the marts learn about payers (macros/payers.sql).
+  # Onboard a payer: give its feed staging + intermediate models, add its two conformed
+  # views (models/intermediate/_conformed__models.yml: same columns and types for every
+  # payer), then add an entry here. The marts' SQL never changes.
+  # Retire a payer: set retired_month. Its history stays in every mart; dim_member stops
+  # counting it as current coverage and fct_member_months ends at its last delivery.
+  # Offboard completely: remove the entry (the marts are rebuilt without it).
+  #   payer_id      stable key used in every mart (snake_case, never reused)
+  #   dbt_source    the feed's dbt source: models are stg_<src>__*, int_<src>__conformed_*
+  #   *_month       YYYY-MM
+  payers:
+    - payer_id: cms_ffs
+      payer_name: CMS Medicare Fee-for-Service
+      line_of_business: Medicare FFS
+      dbt_source: cclf
+      onboarded_month: "2023-01"
+      retired_month: null
+    - payer_id: humana_ma
+      payer_name: Humana Medicare Advantage
+      line_of_business: Medicare Advantage
+      dbt_source: humana
+      onboarded_month: "2023-01"
+      retired_month: null
+
 models:
   claims_lakehouse:
     staging:
@@ -28,3 +53,9 @@ models:
       +materialized: incremental
       +schema: intermediate
       +on_schema_change: fail
+    marts:
+      # Gold: rebuilt in full on every run (small, derived, always consistent) and written
+      # as Parquet to the profile's external_root (the marts bucket in Lambda, a local
+      # folder in dev and tests). DuckDB keeps a view over each file.
+      +materialized: external
+      +schema: marts

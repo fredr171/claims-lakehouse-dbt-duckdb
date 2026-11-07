@@ -16,6 +16,12 @@ variable "raw_bucket" {
   default     = "fredr-claims-raw-2026"
 }
 
+variable "marts_bucket" {
+  description = "Existing marts/gold bucket: one Parquet file per dbt mart, written by the transform Lambda. Must match marts_root in config/transform.yml. Not managed here."
+  type        = string
+  default     = "fredr-claims-marts-2026"
+}
+
 variable "landing_prefixes" {
   description = "One prefix per feed; .csv objects under each trigger ingestion. Must match landing_prefixes in config/ingestion.yml."
   type        = list(string)

@@ -2,8 +2,9 @@
 
 An event-driven ETL pipeline on AWS for monthly healthcare claims deliveries from two payers:
 CMS CCLF (Medicare fee-for-service) and Humana Medicare Advantage. A file dropped in S3 is
-validated, stored immutably as Parquet, and modeled with dbt into current members and netted
-claims. Every failure becomes a GitHub issue that closes itself when the data recovers.
+validated, stored immutably as Parquet, modeled with dbt into member history and netted
+claims, and published as payer-agnostic marts. Every failure becomes a GitHub issue that
+closes itself when the data recovers.
 
 All data is **synthetic**, from my seeded generator repo
 [synthetic-payer-files](https://github.com/fredr171/synthetic-payer-files), which also writes
@@ -26,7 +27,7 @@ flowchart LR
     sqs --> transform["Transform Lambda<br/>dbt build"]
     raw --> transform
     transform --> silver[("Staging + intermediate / silver<br/>DuckDB")]
-    silver -.->|planned| marts[("Marts / gold<br/>S3 Parquet")]
+    silver --> marts[("Marts / gold<br/>S3 Parquet")]
 
     quarantine --> notifier["Notifier Lambda"]
     transform -->|run report| notifier
@@ -40,7 +41,7 @@ flowchart LR
 | Raw (bronze) | S3, Parquet | Every delivery, all columns as text, plus lineage columns |
 | Staging (silver) | DuckDB views | Typed, renamed, current deliveries only |
 | Intermediate (silver) | DuckDB incremental tables | Member history (SCD2), claim families with net paid |
-| Marts (gold) | S3, Parquet | *Planned* |
+| Marts (gold) | S3, Parquet | Payer-agnostic members, claims, member months, PMPM |
 
 ## Key decisions, layer by layer
 
@@ -83,7 +84,21 @@ flowchart LR
   which raw files built it; each run recomputes only the keys touched by new or superseded
   files. Delivery order doesn't matter, and an incremental run equals a full rebuild.
 
-### 5. Orchestration and alerting: event-driven, one build at a time
+### 5. Marts (gold): payers plug in, the marts never change
+- **Payer registry:** one list in `dbt_project.yml` is the only place the marts learn about
+  payers. Each payer supplies two **conformed** views (coverage spans and claim families)
+  under an enforced dbt contract: same columns and types for every payer, with payer codes
+  (sex `1`/`2` vs `M`/`F`, `CANCELLED` vs `VOIDED`) mapped there, never in the marts.
+- **Five marts**, unioned from the conformed views: `dim_payer`, `dim_member` (one row per
+  person across payers, keyed by MBI, so an FFS → Medicare Advantage switcher is one member),
+  `fct_claims`, `fct_member_months` and `agg_payer_monthly` (PMPM). No names or addresses.
+- **Lifecycle without SQL changes:** *onboard* = conformed views + a registry entry;
+  *retire* = set `retired_month` (history stays, members stop counting as current, late files
+  warn); *offboard* = remove the entry (the payer drops out of every mart).
+- **Payer isolation:** the runner builds one feed per dbt pass, so a stop in one payer never
+  freezes another payer's gold.
+
+### 6. Orchestration and alerting: event-driven, one build at a time
 - Each ingested file publishes an event; a FIFO queue serializes builds of the **whole feed**
   (so a bad file of one type keeps blocking even when a clean file of another type arrives).
 - Build outcomes: passed, warned, stopped (state published, bad feed held back) or error (old
@@ -96,7 +111,7 @@ flowchart LR
 
 ## Testing
 
-243 pytest tests run with no AWS or GitHub access (moto and responses mock them):
+250 pytest tests run with no AWS or GitHub access (moto and responses mock them):
 
 - **Every ingestion check** against deliberately broken fixture files (BOM, ragged rows, bad
   encoding, missing keys, ...).
@@ -104,8 +119,11 @@ flowchart LR
   the real code, run dbt, and match current members, member changes, claim actions and net
   paid exactly. Loading the months in uneven batches, or re-sending old months, must give the
   same tables as a full rebuild.
+- **Marts against the answer keys:** net paid by service month for both payers, the 17 payer
+  switchers (coverage spans and current payer), and member months in the last month.
 - **Gating:** corrupted deliveries prove that stops block intermediate (and keep blocking later
-  months), a re-send recovers it, and warns don't block.
+  months), a re-send recovers it, warns don't block, a stop in one payer still refreshes the
+  other payer's marts, and retiring, offboarding and onboarding a payer work by registry alone.
 - Every new dbt test was first shown to **fail on broken data** before it was trusted.
 
 ## Found in live runs
@@ -125,7 +143,7 @@ Things the live pipeline exposed, each fixed and covered by a test:
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev,dbt]"   # also installs the pinned generator
-.venv/Scripts/python -m pytest                        # all tests, offline (~10 min)
+.venv/Scripts/python -m pytest                        # all tests, offline (~30 min)
 .venv/Scripts/python -m pytest -m "not dbt"           # fast tests (~1 min)
 cd dbt && ../.venv/Scripts/dbt build                  # build against S3 (AWS CLI profile)
 ```
@@ -135,5 +153,4 @@ model, AWS resource and CLI, see [docs/pipeline-details.md](docs/pipeline-detail
 
 ## Next
 
-Marts published to S3 (dbt external materialization), Terraform state in an S3 backend, and
-CI with GitHub Actions.
+Terraform state in an S3 backend, and CI with GitHub Actions.

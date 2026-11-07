@@ -7,6 +7,9 @@ claims_lakehouse:
       type: duckdb
       # Relative to dbt/; gitignored (*.duckdb). Tests set CLAIMS_DUCKDB_PATH to a temp file.
       path: "{{ env_var('CLAIMS_DUCKDB_PATH', 'claims_lakehouse.duckdb') }}"
+      # Marts (gold) Parquet. Local by default (gitignored): only the Lambda publishes to the
+      # marts bucket, so a local build never overwrites production gold.
+      external_root: "{{ env_var('CLAIMS_MARTS_ROOT', 'marts_local') }}"
       threads: 4
       extensions:
         - httpfs
@@ -21,6 +24,7 @@ claims_lakehouse:
     lambda:
       type: duckdb
       path: "{{ env_var('CLAIMS_DUCKDB_PATH') }}"
+      external_root: "{{ env_var('CLAIMS_MARTS_ROOT', 's3://fredr-claims-marts-2026') }}"
       threads: 4
       extensions:
         - httpfs
