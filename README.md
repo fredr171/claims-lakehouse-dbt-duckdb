@@ -1,5 +1,7 @@
 # Claims Lakehouse: S3 + Lambda + dbt-duckdb
 
+[![CI](https://github.com/fredr171/claims-lakehouse-dbt-duckdb/actions/workflows/ci.yml/badge.svg)](https://github.com/fredr171/claims-lakehouse-dbt-duckdb/actions/workflows/ci.yml)
+
 An event-driven ETL pipeline on AWS for monthly healthcare claims deliveries from two payers:
 CMS CCLF (Medicare fee-for-service) and Humana Medicare Advantage. A file dropped in S3 is
 validated, stored immutably as Parquet, modeled with dbt into member history and netted
@@ -107,7 +109,9 @@ flowchart LR
   each other.
 - **GitHub issues instead of email:** quarantines, stopped builds and five CloudWatch
   alarms each open one issue, add comments while the problem persists, and close it on
-  recovery. The repo is public, so issues carry only identifiers and counts, never data values.
+  recovery (e.g. [#11](https://github.com/fredr171/claims-lakehouse-dbt-duckdb/issues/11): a
+  stopped build, closed by the next passing run). The repo is public, so issues carry only
+  identifiers and counts, never data values.
 
 ## Testing
 
@@ -134,7 +138,8 @@ Things the live pipeline exposed, each fixed and covered by a test:
 - dbt crashed in Lambda (no `/dev/shm` for multiprocessing locks); dbt now starts with threading
   locks, and a test simulates Lambda's environment.
 - Landing 2023-07 before 2023-06 stopped the Humana build on a member change test until the
-  missing month arrived, then caught up cleanly.
+  missing month arrived, then caught up cleanly (issue
+  [#11](https://github.com/fredr171/claims-lakehouse-dbt-duckdb/issues/11) opened and closed itself).
 - A bad eligibility file and its re-send drove the switch to immutable bronze, and showed
   that an alert must be keyed by the feed the *failing test* reads, not every feed the run built.
 
@@ -165,7 +170,7 @@ why they came first.
 |---|---|---|---|
 | Accounts and access | One AWS account, one IAM admin user | AWS Organizations with separate dev, test and prod accounts; SSO via IAM Identity Center; no long-lived keys | Smaller blast radius; every prod access is tied to a named person |
 | Infrastructure | Terraform with local state | Remote state in S3 with locking, reusable modules per environment, `terraform plan` on every PR | Several people apply changes, so state must be shared and locked |
-| CI/CD | Tests run locally | GitHub Actions with OIDC to AWS: ruff, pytest, dbt slim CI (`state:modified+`) against a prod clone, promotion from dev to prod | Every change is tested the same way before it reaches prod |
+| CI/CD | GitHub Actions: ruff and the fast tests on every PR; dbt end-to-end tests run locally | GitHub Actions with OIDC to AWS: the full test suite, dbt slim CI (`state:modified+`) against a prod clone, promotion from dev to prod | Every change is tested the same way before it reaches prod |
 | Compliance | Synthetic data, SSE-S3 | HIPAA: AWS BAA, KMS customer-managed keys, CloudTrail data events, VPC endpoints, Macie on landing, retention set by policy (years, not 90 days) | Real claims are PHI |
 | PII | Names and addresses kept in staging only, by convention | Column-level access (Lake Formation or warehouse masking policies): only approved roles see names, addresses and birth dates | Minimum-necessary access, enforced by the platform |
 | File intake | Files uploaded to S3 by hand | AWS Transfer Family (SFTP) per payer, a delivery calendar, and an alert when an expected file is late | Payers push files, and a missing file is an incident too |

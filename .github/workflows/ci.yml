@@ -1,0 +1,37 @@
+# Lint + fast tests on every push to main and every PR. No AWS or GitHub access: S3 and SSM
+# are mocked by moto, GitHub by responses. The slow dbt end-to-end tests (-m dbt, ~30 min)
+# still run locally.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"  # same as the Lambda runtime
+          cache: pip
+
+      # The dbt extra is needed even for the fast tests: the dbt test modules import duckdb
+      # when pytest collects them, before -m "not dbt" deselects them.
+      - name: Install
+        run: python -m pip install -e ".[dev,dbt]"
+
+      - name: Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Pytest (fast, no dbt)
+        run: python -m pytest -m "not dbt"

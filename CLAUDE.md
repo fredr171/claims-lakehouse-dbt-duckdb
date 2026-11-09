@@ -430,7 +430,9 @@ ticket result recorded.
 - Python 3 (3.13 in Lambda), standard library csv, pyarrow, boto3, requests
 - AWS Lambda + S3 event triggers; Terraform for infrastructure (infra/terraform)
 - pytest with moto (S3/SSM) and responses (GitHub); ruff for lint/format
-- dbt Core 1.12 + dbt-duckdb 1.11 for transformations; later GitHub Actions for CI/scheduling
+- dbt Core 1.12 + dbt-duckdb 1.11 for transformations; GitHub Actions CI (.github/workflows/ci.yml: ruff +
+  `pytest -m "not dbt"` on Python 3.13; installs `.[dev,dbt]` because the dbt test modules import
+  duckdb at collection). The slow dbt tests run locally
 
 ## Security
 
