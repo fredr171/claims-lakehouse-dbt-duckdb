@@ -5,6 +5,11 @@
 -- payer's delivery window (dim_payer first/last_delivery_month): before it nothing is known,
 -- after it (a retired payer, or data not delivered yet) coverage is not assumed. Overlapping
 -- spans of one member at one payer count once.
+--
+-- When a member changes plans (or payer member ID) within a month at the same payer, the
+-- month is attributed to max(plan_code) / max(payer_member_id): a simple, deterministic
+-- choice, not "the plan held longest" or "the plan on the 1st". A business rule would replace
+-- it if plan-level PMPM mattered.
 
 with coverage as (
 
