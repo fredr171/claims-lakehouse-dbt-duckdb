@@ -176,28 +176,4 @@ why they came first.
 | Data quality | dbt tests | Plus volume and distribution anomaly checks (e.g. Elementary), with test results kept as history | Catches a file that is valid but wrong, such as half the usual rows |
 | Discovery | dbt docs and this README | A data catalog with lineage (DataHub or OpenMetadata), model owners via CODEOWNERS, a dbt semantic layer for PMPM | Analysts can find and trust data without asking the builder |
 | Team structure | One dbt project | dbt Mesh: a project per domain (intake, members, claims) exposing contracted public models | Teams ship independently; the payer contract already works this way |
-
-### Marts designed with the business
-
-Here the marts were shaped by the answer keys and my own judgment. In an enterprise they would
-start from the people who use them (actuarial, finance, care management, quality reporting),
-because many choices that look technical are really business definitions:
-
-- **Member months:** a month counts here if the member was covered on any day of it. Finance
-  may want coverage on the 1st, or prorated days; each choice changes every PMPM.
-- **PMPM basis:** net *paid* by *service* month. Actuarial usually also wants *allowed*
-  amounts and paid-month views, and recent service months are incomplete until claims run
-  out, so they need completion factors (IBNR) before anyone compares months.
-- **Claim status and counts:** voided claims are excluded from counts here; whether a
-  replaced claim counts once or twice is a reporting rule, not a pipeline detail.
-
-How that would work in practice:
-
-- **Requirements before models:** start from the questions and reports a mart must answer,
-  agree on the grain and every metric definition, and record them in the model docs (and the
-  semantic layer) so a "member month" means the same thing on every dashboard.
-- **Sign-off and UAT:** business users reconcile new marts against the numbers they already
-  trust (finance close, payer remittance reports) before release, the same way this project
-  reconciles against answer keys.
-- **Owned definitions and change control:** each mart has a business owner; changing a
-  definition is a reviewed change request with a version note, since it restates history.
+| Mart design | Shaped by the answer keys and my own definitions (a member month = covered any day; PMPM = net paid by service month) | Requirements, metric definitions and sign-off from actuarial and finance, an owner per mart, definition changes by change request | Member months and PMPM are business definitions; changing one restates history |
