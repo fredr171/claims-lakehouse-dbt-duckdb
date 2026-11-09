@@ -151,6 +151,28 @@ cd dbt && ../.venv/Scripts/dbt build                  # build against S3 (AWS CL
 Infrastructure is Terraform in [`infra/terraform/`](infra/terraform/). For every check,
 model, AWS resource and CLI, see [docs/pipeline-details.md](docs/pipeline-details.md).
 
-## Next
+## Adapting it for an enterprise
 
-Terraform state in an S3 backend, and CI with GitHub Actions.
+This project is built for one engineer, two payers and synthetic data. With real PHI, dozens
+of payers and a team, the platform underneath would change, but the design decisions would not.
+
+**What carries over unchanged:** immutable bronze keyed by delivery, file-level validation with
+quarantine, stop vs warn gating, incremental builds by affected keys, the payer registry with
+its conformed contract, and answer-key tests. These are the hard parts to add later, which is
+why they came first.
+
+| Area | Today | At enterprise scale | Why |
+|---|---|---|---|
+| Accounts and access | One AWS account, one IAM admin user | AWS Organizations with separate dev, test and prod accounts; SSO via IAM Identity Center; no long-lived keys | Smaller blast radius; every prod access is tied to a named person |
+| Infrastructure | Terraform with local state | Remote state in S3 with locking, reusable modules per environment, `terraform plan` on every PR | Several people apply changes, so state must be shared and locked |
+| CI/CD | Tests run locally | GitHub Actions with OIDC to AWS: ruff, pytest, dbt slim CI (`state:modified+`) against a prod clone, promotion from dev to prod | Every change is tested the same way before it reaches prod |
+| Compliance | Synthetic data, SSE-S3 | HIPAA: AWS BAA, KMS customer-managed keys, CloudTrail data events, VPC endpoints, Macie on landing, retention set by policy (years, not 90 days) | Real claims are PHI |
+| PII | Names and addresses kept in staging only, by convention | Column-level access (Lake Formation or warehouse masking policies): only approved roles see names, addresses and birth dates | Minimum-necessary access, enforced by the platform |
+| File intake | Files uploaded to S3 by hand | AWS Transfer Family (SFTP) per payer, a delivery calendar, and an alert when an expected file is late | Payers push files, and a missing file is an incident too |
+| Ingestion compute | Lambda (15 min, 10 GB limits) | Lambda for small files, ECS Fargate or Glue for large ones, running the same `process_file` | Some payer files are tens of GB |
+| Storage and compute | Parquet plus one DuckDB file in S3, one build at a time | Apache Iceberg tables queried by Snowflake, Databricks or Athena; the dbt models move by switching adapters | Many concurrent readers and writers, time travel, schema evolution |
+| Orchestration | EventBridge → SQS FIFO → Lambda | Airflow, Dagster or Step Functions: payers build in parallel, with backfills and reruns from a UI | Dozens of feeds; operators rerun a feed without a deploy |
+| Alerting | GitHub issues | PagerDuty for stops and errors, Jira or ServiceNow for quarantines (only the notifier's client changes), an SLA per payer | On-call rotation and existing ticket workflows |
+| Data quality | dbt tests | Plus volume and distribution anomaly checks (e.g. Elementary), with test results kept as history | Catches a file that is valid but wrong, such as half the usual rows |
+| Discovery | dbt docs and this README | A data catalog with lineage (DataHub or OpenMetadata), model owners via CODEOWNERS, a dbt semantic layer for PMPM | Analysts can find and trust data without asking the builder |
+| Team structure | One dbt project | dbt Mesh: a project per domain (intake, members, claims) exposing contracted public models | Teams ship independently; the payer contract already works this way |
