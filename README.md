@@ -182,3 +182,7 @@ why they came first.
 | Discovery | dbt docs and this README | A data catalog with lineage (DataHub or OpenMetadata), model owners via CODEOWNERS, a dbt semantic layer for PMPM | Analysts can find and trust data without asking the builder |
 | Team structure | One dbt project | dbt Mesh: a project per domain (intake, members, claims) exposing contracted public models | Teams ship independently; the payer contract already works this way |
 | Mart design | Shaped by the answer keys and my own definitions (a member month = covered any day; PMPM = net paid by service month) | Requirements, metric definitions and sign-off from actuarial and finance, an owner per mart, definition changes by change request | Member months and PMPM are business definitions; changing one restates history |
+
+## License
+
+Released under the [MIT License](LICENSE).
