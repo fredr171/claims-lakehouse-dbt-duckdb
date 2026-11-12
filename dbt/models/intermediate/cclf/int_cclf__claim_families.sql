@@ -38,7 +38,8 @@ with part_a_versions as (
 
 ),
 
--- CCLF5 is line-level; roll lines up to one row per claim version.
+-- CCLF5 is line-level; roll lines up to one row per claim version. any_value() is safe:
+-- every line of a version agrees on these (stop test assert_cclf_part_b_version_lines_agree).
 part_b_versions as (
 
     select

@@ -233,6 +233,11 @@ Each test is a **stop** or a **warn** (policy in `dbt/macros/test_scoping.sql`):
   allowed − paid, reversals never positive) warn per line. They **stop** when more than
   1% of a month's lines (and at least 5) break them, because that means a broken
   extract rather than a few odd lines.
+- **Lines of one claim version must agree.** Line-level files (CCLF5, MAP_MEDCLM) roll up
+  to claim versions, taking fields such as status, adjustment type, member and contract
+  with `any_value()`. That is only correct when every line of the version carries the
+  same value, so a version whose lines disagree (NULL counts as a value) is a **stop**
+  (`assert_cclf_part_b_version_lines_agree`, `assert_ma_payer_claim_version_lines_agree`).
 
 `tests/test_dbt_gating.py` proves the gating on corrupted copies of real deliveries:
 - a stop skips the intermediate model;
@@ -590,7 +595,7 @@ CloudWatch alarm (ALARM/OK) ──► SNS claims-etl-alerts ──► claims-etl
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest      # 250 tests; no AWS or GitHub access (moto + responses)
+.venv/Scripts/python -m pytest      # 252 tests; no AWS or GitHub access (moto + responses)
 .venv/Scripts/python -m pytest -m "not dbt"   # skip the ~30 min dbt end-to-end tests
 .venv/Scripts/python -m ruff check src tests
 ```
