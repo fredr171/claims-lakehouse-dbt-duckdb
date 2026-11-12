@@ -189,7 +189,7 @@ class TransformRun:
 
     @property
     def feed_label(self) -> str:
-        """The feeds of the PROBLEM: a run can build cclf+humana and stop on a humana test."""
+        """The feeds of the PROBLEM: a run can build cclf+ma_payer and stop on a ma_payer test."""
         return "+".join(self.problem_feeds) or "unknown"
 
     @property

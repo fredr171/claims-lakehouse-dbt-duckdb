@@ -1,17 +1,17 @@
 sources:
-  - name: humana
+  - name: ma_payer
     description: >
-      Raw (bronze) Humana Medicare Advantage deliveries written by the ingestion Lambda:
+      Raw (bronze) MA payer deliveries written by the ingestion Lambda:
       one Parquet file per DELIVERED FILE, every source column as VARCHAR exactly as
       delivered, plus ingestion metadata columns. Immutable: partitioned by delivery_month
       (from the file name) and checksum (the file's SHA-256), so a corrected re-send sits
-      next to the original; stg_humana__deliveries decides which delivery is current. Field names are invented by the synthetic
-      generator (Humana's real layouts are proprietary).
+      next to the original; stg_ma_payer__deliveries decides which delivery is current. Field names are invented by the synthetic
+      generator, not modeled on any real payer's files.
     config:
-      # {name} is the table name below; humana_raw_root defaults to the S3 raw bucket
+      # {name} is the table name below; ma_payer_raw_root defaults to the S3 raw bucket
       # (dbt_project.yml) and tests point it at a local folder. Partition value stays text.
       external_location: >-
-        read_parquet('{{ var("humana_raw_root") }}/{name}/*/*/*.parquet',
+        read_parquet('{{ var("ma_payer_raw_root") }}/{name}/*/*/*.parquet',
         hive_partitioning = true, hive_types_autocast = false)
       loaded_at_field: _ingested_at
       freshness:
@@ -20,6 +20,6 @@ sources:
         error_after: {count: 65, period: day}
     tables:
       - name: member_eligibility
-        description: "HUM_ELIG_YYYYMM.csv: members new, changed or terminated that month (full rows)."
+        description: "MAP_ELIG_YYYYMM.csv: members new, changed or terminated that month (full rows)."
       - name: medical_claim_lines
-        description: "HUM_MEDCLM_YYYYMM.csv: medical claim lines, institutional and professional, one row per line per claim version."
+        description: "MAP_MEDCLM_YYYYMM.csv: medical claim lines, institutional and professional, one row per line per claim version."

@@ -1,11 +1,11 @@
-# Humana intermediate: state that spans deliveries. Same incremental-by-affected-key
+# MA payer intermediate: state that spans deliveries. Same incremental-by-affected-key
 # pattern as the CMS models (macros/incremental_by_affected_keys.sql); an incremental run
 # must equal a full rebuild, which tests/test_dbt_intermediate.py checks.
 
 models:
-  - name: int_humana__member_versions
+  - name: int_ma_payer__member_versions
     description: >
-      Humana member history (SCD type 2) from HUM_ELIG. One row per member per version;
+      MA payer member history (SCD type 2) from MAP_ELIG. One row per member per version;
       a version starts when any tracked attribute changes (hash comparison). change_type
       is derived: NEW, UPDATE, or TERM (enrollment_end_date first set). valid_to is
       exclusive and NULL while current. Contains synthetic names/addresses: never select
@@ -15,7 +15,7 @@ models:
         description: "member_id | valid_from (YYYY-MM). Unique per version."
         data_tests: [not_null, unique]
       - name: member_id
-        description: "Humana member ID."
+        description: "MA payer member ID."
         data_tests:
           - not_null
           - unique:
@@ -51,13 +51,13 @@ models:
       - name: last_file_as_of_date
         description: "Newest FILE_AS_OF_DT among the rows collapsed into this version."
       - name: delivery_count
-        description: "Delivered HUM_ELIG rows collapsed into this version."
+        description: "Delivered MAP_ELIG rows collapsed into this version."
       - name: _source_checksums
         description: "Sorted SHA-256s of the raw files this version was built from (drives incremental runs)."
 
-  - name: int_humana__claim_families
+  - name: int_ma_payer__claim_families
     description: >
-      One row per Humana claim family: the original claim plus any reversal (void) and
+      One row per MA payer claim family: the original claim plus any reversal (void) and
       replacement, keyed by the original's claim_id. net_paid_amount is the sum over
       every version (reversals are negated), checked against the status rule: voided 0,
       replaced = the replacement's paid, denied 0, otherwise the original's paid.
@@ -71,7 +71,7 @@ models:
           - not_null
           - relationships:
               arguments:
-                to: ref('int_humana__member_versions')
+                to: ref('int_ma_payer__member_versions')
                 field: member_id
       - name: beneficiary_mbi
         description: "MBI on the family's first version."

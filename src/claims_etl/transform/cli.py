@@ -34,7 +34,7 @@ EXIT_STOPPED = 2
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="dbt build of staging + intermediate.")
     which = parser.add_mutually_exclusive_group(required=True)
-    which.add_argument("--feed", action="append", help="dbt source to build (cclf, humana)")
+    which.add_argument("--feed", action="append", help="dbt source to build (cclf, ma_payer)")
     which.add_argument("--all", action="store_true", help="build every feed")
     parser.add_argument(
         "--months", help="comma-separated YYYY-MM delivery months scoping the WARN tests "
@@ -43,7 +43,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--db", type=Path, help="local DuckDB state file instead of S3")
     parser.add_argument(
         "--raw-root", type=Path,
-        help="local raw folder (<root>/cms/cclf/..., <root>/humana/ma/...) instead of S3"
+        help="local raw folder (<root>/cms/cclf/..., <root>/ma_payer/ma/...) instead of S3"
     )  # fmt: skip
     parser.add_argument("--runs-dir", type=Path, default=Path("transform_runs"),
                         help="report folder when --db is used")  # fmt: skip
@@ -79,7 +79,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         root = args.raw_root.resolve()
         extra_vars = {
             "cclf_raw_root": (root / "cms" / "cclf").as_posix(),
-            "humana_raw_root": (root / "humana" / "ma").as_posix(),
+            "ma_payer_raw_root": (root / "ma_payer" / "ma").as_posix(),
         }
 
     try:

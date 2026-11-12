@@ -1,7 +1,7 @@
 {#
-    Humana line amount rules, shared by two tests:
-      tests/assert_humana_amounts_consistent.sql        WARN on every line that breaks one
-      tests/assert_humana_amounts_mostly_consistent.sql STOP when >1% (and >= 5) of a month's lines do
+    MA payer line amount rules, shared by two tests:
+      tests/assert_ma_payer_amounts_consistent.sql        WARN on every line that breaks one
+      tests/assert_ma_payer_amounts_mostly_consistent.sql STOP when >1% (and >= 5) of a month's lines do
 
     Originals and replacements (frequency 1/7): 0 <= paid <= allowed <= billed; denied
     lines allow and pay nothing; outside capitation, member cost share (copay +
@@ -10,7 +10,7 @@
     few only warn; a broken extract breaks many lines at once.
 #}
 
-{% macro humana_amount_problem() -%}
+{% macro ma_payer_amount_problem() -%}
     case
         when claim_frequency_code = '8' then
             case when billed_amount > 0 or allowed_amount > 0 or paid_amount > 0

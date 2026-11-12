@@ -1,4 +1,4 @@
--- Humana member history (SCD type 2) from HUM_ELIG: one row per member per version.
+-- MA payer member history (SCD type 2) from MAP_ELIG: one row per member per version.
 --
 -- Same pattern as int_cclf__beneficiary_versions: a new version starts whenever the
 -- tracked attributes differ from the member's previous delivered row (hash comparison),
@@ -16,7 +16,7 @@
     config(
         unique_key='member_id',
         incremental_strategy='delete+insert',
-        post_hook="{{ delete_rows_from_vanished_files([ref('stg_humana__member_eligibility')]) }}",
+        post_hook="{{ delete_rows_from_vanished_files([ref('stg_ma_payer__member_eligibility')]) }}",
     )
 }}
 
@@ -53,7 +53,7 @@ with staged as (
     select
         *,
         {{ row_hash(tracked_columns) }} as attribute_hash
-    from {{ ref('stg_humana__member_eligibility') }}
+    from {{ ref('stg_ma_payer__member_eligibility') }}
 
 ),
 

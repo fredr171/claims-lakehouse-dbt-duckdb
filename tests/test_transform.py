@@ -148,18 +148,18 @@ def test_publish_events_flag_must_be_boolean(config_dir: Path) -> None:
 
 def test_transform_config_maps_feeds_to_dbt_sources(config_dir: Path) -> None:
     config = load_transform_config(config_dir)
-    assert config.feed_sources == {"cms/cclf/": "cclf", "humana/ma/": "humana"}
+    assert config.feed_sources == {"cms/cclf/": "cclf", "ma_payer/ma/": "ma_payer"}
     assert config.raw_bucket == RAW_BUCKET
-    events = [_event(), _event(month="2023-02"), _event("humana/ma/")]
+    events = [_event(), _event(month="2023-02"), _event("ma_payer/ma/")]
     # The whole feed, never one file type: every STOP test of the feed runs each time.
     assert runner.selectors_for([e.feed for e in events], config) == [
-        "source:cclf+", "source:humana+"
+        "source:cclf+", "source:ma_payer+"
     ]  # fmt: skip
 
 
 def test_transform_config_rejects_unmapped_feed(config_dir: Path) -> None:
     path = config_dir / "transform.yml"
-    path.write_text(path.read_text(encoding="utf-8").replace("  humana/ma/: humana\n", ""),
+    path.write_text(path.read_text(encoding="utf-8").replace("  ma_payer/ma/: ma_payer\n", ""),
                     encoding="utf-8")  # fmt: skip
     with pytest.raises(ConfigError, match="must map exactly"):
         load_transform_config(config_dir)
@@ -280,7 +280,7 @@ def test_cli_feeds_and_unscoped_months(stub_dbt, config_dir, tmp_path, capsys) -
         "--runs-dir", str(tmp_path / "runs"), "--raw-root", str(tmp_path),
     ])  # fmt: skip
     assert code == cli.EXIT_STOPPED
-    assert calls[0]["selectors"] == ["source:cclf+", "source:humana+"]
+    assert calls[0]["selectors"] == ["source:cclf+", "source:ma_payer+"]
     assert calls[0]["months"] is None  # no --months: WARN tests cover all history
     assert calls[0]["vars"]["cclf_raw_root"].endswith("/cms/cclf")
     assert json.loads(capsys.readouterr().out)["outcome"] == "stopped"
@@ -483,30 +483,30 @@ def test_node_feeds_walks_the_manifest_to_its_sources() -> None:
     from claims_etl.transform.runner import node_feeds
 
     manifest = {"parent_map": {
-        "test.p.not_null_stg_humana__x_mbi.1": ["model.p.stg_humana__x"],
-        "model.p.stg_humana__x": ["source.p.humana.member_eligibility",
-                                  "model.p.stg_humana__deliveries"],
-        "model.p.stg_humana__deliveries": ["source.p.humana.member_eligibility",
-                                           "source.p.humana.medical_claim_lines"],
-        "test.p.cross_feed": ["model.p.stg_humana__x", "model.p.stg_cclf__y"],
+        "test.p.not_null_stg_ma_payer__x_mbi.1": ["model.p.stg_ma_payer__x"],
+        "model.p.stg_ma_payer__x": ["source.p.ma_payer.member_eligibility",
+                                  "model.p.stg_ma_payer__deliveries"],
+        "model.p.stg_ma_payer__deliveries": ["source.p.ma_payer.member_eligibility",
+                                           "source.p.ma_payer.medical_claim_lines"],
+        "test.p.cross_feed": ["model.p.stg_ma_payer__x", "model.p.stg_cclf__y"],
         "model.p.stg_cclf__y": ["source.p.cclf.claims_header"],
-        "source.p.humana.member_eligibility": [],
+        "source.p.ma_payer.member_eligibility": [],
     }}  # fmt: skip
-    assert node_feeds(manifest, "test.p.not_null_stg_humana__x_mbi.1") == ["humana"]
-    assert node_feeds(manifest, "test.p.cross_feed") == ["cclf", "humana"]
+    assert node_feeds(manifest, "test.p.not_null_stg_ma_payer__x_mbi.1") == ["ma_payer"]
+    assert node_feeds(manifest, "test.p.cross_feed") == ["cclf", "ma_payer"]
     assert node_feeds({}, "test.p.anything") == []
 
 
 def test_one_dbt_pass_per_feed_and_a_later_skip_never_hides_a_built_mart(
     monkeypatch, tmp_path
 ) -> None:
-    """CMS rebuilds the marts; the Humana pass then stops and skips them. The marts were
+    """CMS rebuilds the marts; the MA payer pass then stops and skips them. The marts were
     built (the CMS pass), so the report must not list them as skipped."""
     mart = "model.claims_lakehouse.fct_claims"
-    humana_stop = "test.claims_lakehouse.not_null_stg_humana__x_mbi.1"
+    ma_payer_stop = "test.claims_lakehouse.not_null_stg_ma_payer__x_mbi.1"
     per_selector = {
         "source:cclf+": _results((MODEL, "success"), (mart, "success")),
-        "source:humana+": _results((humana_stop, "fail"), (mart, "skipped")),
+        "source:ma_payer+": _results((ma_payer_stop, "fail"), (mart, "skipped")),
     }
     selectors: list[str] = []
 
@@ -517,14 +517,14 @@ def test_one_dbt_pass_per_feed_and_a_later_skip_never_hides_a_built_mart(
 
     monkeypatch.setattr(runner, "_dbt_build", fake)
     report = run_transform(
-        [_event("humana/ma/"), _event("cms/cclf/")], config=_tconfig(tmp_path),
+        [_event("ma_payer/ma/"), _event("cms/cclf/")], config=_tconfig(tmp_path),
         state=LocalStateStore(tmp_path / "state.duckdb"),
         sink=LocalRunSink(tmp_path / "runs", "r"), run_id="r",
     )  # fmt: skip
-    assert selectors == ["source:cclf+", "source:humana+"]  # one pass per feed, in order
+    assert selectors == ["source:cclf+", "source:ma_payer+"]  # one pass per feed, in order
     assert report.outcome is Outcome.STOPPED and report.published
     assert mart not in report.skipped
-    assert [s["name"] for s in report.stops] == ["not_null_stg_humana__x_mbi"]
+    assert [s["name"] for s in report.stops] == ["not_null_stg_ma_payer__x_mbi"]
     saved = json.loads((tmp_path / "runs/r/run_results.json").read_text())
     assert {r["unique_id"]: r["status"] for r in saved["results"]}[mart] == "success"
 

@@ -53,7 +53,7 @@ def api():
 
 
 def _report(run_id: str = "20261105T202804Z-b009e1f2", outcome: str = "stopped",
-            selectors=("source:cclf+", "source:humana+"), **extra: Any) -> dict:  # fmt: skip
+            selectors=("source:cclf+", "source:ma_payer+"), **extra: Any) -> dict:  # fmt: skip
     data = {
         "run_id": run_id,
         "started_at": "2026-11-05T20:28:04+00:00",
@@ -118,7 +118,7 @@ def test_stopped_run_opens_issue_with_tests_counts_and_key(s3, acfg, client, api
 
     assert (result.outcome, result.ticket_numbers) == (AlertOutcome.CREATED, (50,))
     [issue] = _posted(api, ISSUES)
-    assert issue["title"] == f"[Transform stopped] cclf+humana: {STOP_TEST}"
+    assert issue["title"] == f"[Transform stopped] cclf+ma_payer: {STOP_TEST}"
     assert issue["labels"] == ["pipeline-alert", "transform", "stopped"]
     body = issue["body"]
     assert f"| `{STOP_TEST}` | 3 |" in body
@@ -170,7 +170,7 @@ def test_error_run_never_posts_messages_or_exception_text(s3, acfg, client, api)
 
     [issue] = _posted(api, ISSUES)
     text = issue["title"] + issue["body"]
-    assert issue["title"] == "[Transform error] cclf+humana: int_cclf__claim_families failed"
+    assert issue["title"] == "[Transform error] cclf+ma_payer: int_cclf__claim_families failed"
     assert issue["labels"] == ["pipeline-alert", "transform", "error"]
     for leaked in (secret, "Conversion", "dbt exited", "@evil", "http://a"):
         assert leaked not in text
@@ -185,14 +185,14 @@ def test_crash_without_node_errors_is_keyed_by_exception_type(s3, acfg, client, 
     notify_transform_report(key, config=acfg, store=s3, client=client)
 
     [issue] = _posted(api, ISSUES)
-    assert issue["title"] == "[Transform error] cclf+humana: build crashed (TransformRunError)"
+    assert issue["title"] == "[Transform error] cclf+ma_payer: build crashed (TransformRunError)"
 
 
 def test_good_run_closes_issues_for_the_feeds_it_built(s3, acfg, client, api) -> None:
     key = _put_report(s3, _report(run_id="20261106T000000Z-pass0001", outcome="passed"))
     open_issues = [
         _issue(1, "transform-stopped:cclf:aaaaaaaaaaaa"),
-        _issue(2, "transform-error:cclf+humana:bbbbbbbbbbbb"),
+        _issue(2, "transform-error:cclf+ma_payer:bbbbbbbbbbbb"),
         _issue(3, "alarm:claims-etl-ingest-errors"),  # alarms close only on OK
         _issue(4, "transform-stopped:cclf+other:cccccccccccc"),  # feed not built here
     ]
@@ -212,7 +212,7 @@ def test_good_run_closes_issues_for_the_feeds_it_built(s3, acfg, client, api) ->
 
 def test_good_run_for_one_feed_leaves_a_two_feed_issue_open(s3, acfg, client, api) -> None:
     key = _put_report(s3, _report(outcome="warned", selectors=["source:cclf+"]))
-    api.get(ISSUES, json=[_issue(2, "transform-error:cclf+humana:bbbbbbbbbbbb")])
+    api.get(ISSUES, json=[_issue(2, "transform-error:cclf+ma_payer:bbbbbbbbbbbb")])
 
     result = notify_transform_report(key, config=acfg, store=s3, client=client)
 
@@ -224,23 +224,24 @@ def test_good_run_for_one_feed_leaves_a_two_feed_issue_open(s3, acfg, client, ap
 def test_issue_is_keyed_by_the_failing_tests_feed_and_a_one_feed_run_closes_it(
     s3, acfg, client, api
 ) -> None:
-    """Issue #12: a run built cclf+humana and stopped on a Humana-only test; the fix run
-    built only Humana. The issue must name Humana alone, so that run resolves it."""
-    stop = {"unique_id": "test.claims_lakehouse.not_null_stg_humana__x_mbi.1",
-            "name": "not_null_stg_humana__x_mbi", "failures": 1, "feeds": ["humana"]}  # fmt: skip
+    """Issue #12: a run built cclf+ma_payer and stopped on an MA payer-only test; the fix run
+    built only the MA payer. The issue must name the MA payer alone, so that run resolves it."""
+    stop = {"unique_id": "test.claims_lakehouse.not_null_stg_ma_payer__x_mbi.1",
+            "name": "not_null_stg_ma_payer__x_mbi", "failures": 1,
+            "feeds": ["ma_payer"]}  # fmt: skip
     key = _put_report(s3, _report(stops=[stop]))
     _mock_create(api)
     notify_transform_report(key, config=acfg, store=s3, client=client)
     [issue] = _posted(api, ISSUES)
     alert_key = TransformRun.from_report(_report(stops=[stop]), "s3://x").alert_key
-    assert alert_key.startswith("transform-stopped:humana:")
-    assert issue["title"] == "[Transform stopped] humana: not_null_stg_humana__x_mbi"
-    assert "| Feeds built | `cclf`, `humana` |" in issue["body"]
-    assert "| Problem in | `humana` |" in issue["body"]
+    assert alert_key.startswith("transform-stopped:ma_payer:")
+    assert issue["title"] == "[Transform stopped] ma_payer: not_null_stg_ma_payer__x_mbi"
+    assert "| Feeds built | `cclf`, `ma_payer` |" in issue["body"]
+    assert "| Problem in | `ma_payer` |" in issue["body"]
 
     api.reset()
     fix = _put_report(s3, _report(run_id="20261106T193914Z-5ade588b", outcome="passed",
-                                  selectors=["source:humana+"]))  # fmt: skip
+                                  selectors=["source:ma_payer+"]))  # fmt: skip
     api.get(ISSUES, json=[_issue(12, alert_key)])
     api.post(f"{ISSUES}/12/comments", status=201, json={"html_url": "https://gh/12#c"})
     api.patch(f"{ISSUES}/12", json={})
@@ -251,16 +252,16 @@ def test_issue_is_keyed_by_the_failing_tests_feed_and_a_one_feed_run_closes_it(
 def test_problem_feeds_fall_back_to_the_built_feeds() -> None:
     # Reports written before the runner recorded node feeds, and unknown feed names.
     old = TransformRun.from_report(_report(), "s3://x")
-    assert old.problem_feeds == ("cclf", "humana")
+    assert old.problem_feeds == ("cclf", "ma_payer")
     stray = {"name": STOP_TEST, "failures": 1, "feeds": ["aetna"]}  # not a feed the run built
     assert TransformRun.from_report(_report(stops=[stray]), "s3://x").problem_feeds == (
-        "cclf", "humana")  # fmt: skip
+        "cclf", "ma_payer")  # fmt: skip
     error = _report(outcome="error", errors=[{"unique_id": MODEL_UID, "feeds": ["cclf"]}])
     assert TransformRun.from_report(error, "s3://x").alert_key.startswith("transform-error:cclf:")
 
 
 def test_feeds_of_key() -> None:
-    assert feeds_of_key("transform-stopped:cclf+humana:abc") == {"cclf", "humana"}
+    assert feeds_of_key("transform-stopped:cclf+ma_payer:abc") == {"cclf", "ma_payer"}
     assert feeds_of_key("alarm:claims-etl-ingest-errors") is None
 
 

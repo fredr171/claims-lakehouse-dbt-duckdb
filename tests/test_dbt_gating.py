@@ -57,7 +57,7 @@ if not HAS_DBT:
 
 BASELINE_MONTHS = ["2023-01", "2023-02"]
 CCLF_CLAIMS = "source:cclf+"  # the runner's selectors (claims_etl.transform.runner)
-HUMANA_CLAIMS = "source:humana+"
+MA_PAYER_CLAIMS = "source:ma_payer+"
 
 
 # --- helpers ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ def _plain_paid_lines(raw_store: Path, path: Path, count: int) -> list[int]:
     """Row positions of paid, non-capitated originals whose claim is never reversed or
     replaced anywhere, so raising their paid amount leaves claim-family netting intact."""
     actioned = set()
-    for part in raw_store.glob("humana/ma/medical_claim_lines/*/*/part-0.parquet"):
+    for part in raw_store.glob("ma_payer/ma/medical_claim_lines/*/*/part-0.parquet"):
         t = pq.read_table(part, columns=["CLAIM_ID", "ORIG_CLAIM_ID", "CLAIM_FREQ_CD"])
         actioned |= {c for c, f in zip(t["CLAIM_ID"].to_pylist(), t["CLAIM_FREQ_CD"].to_pylist(),
                                        strict=True) if f != "1"}  # fmt: skip
@@ -209,26 +209,28 @@ def test_stop_skips_intermediate_until_the_file_is_fixed(lake: dict, tmp_path: P
 def test_warn_builds_intermediate_and_is_scoped_to_the_batch(lake: dict) -> None:
     raw, db, store = lake["raw"], lake["db"], lake["raw_store"]
     _publish(store, raw, ["2023-03"])
-    odd = _partition(raw, "humana/ma", "medical_claim_lines", "2023-03")
+    odd = _partition(raw, "ma_payer/ma", "medical_claim_lines", "2023-03")
     _edit(odd, "IN_NETWORK_FLAG", [0], "X")
     _edit(odd, "PAID_AMT", _plain_paid_lines(store, odd, 1), _paid_above_allowed)
 
-    run = _run(lake, [HUMANA_CLAIMS], ["2023-03"])
+    run = _run(lake, [MA_PAYER_CLAIMS], ["2023-03"])
     assert run.returncode == 0, run.output
-    assert _status(run, "accepted_values_stg_humana__medical_claim_lines_in_network_flag") == "warn"
-    assert _status(run, "assert_humana_amounts_consistent") == "warn"
-    assert _status(run, "assert_humana_amounts_mostly_consistent") == "pass"
+    assert (
+        _status(run, "accepted_values_stg_ma_payer__medical_claim_lines_in_network_flag") == "warn"
+    )
+    assert _status(run, "assert_ma_payer_amounts_consistent") == "warn"
+    assert _status(run, "assert_ma_payer_amounts_mostly_consistent") == "pass"
     assert run.with_status("fail") == run.with_status("error") == []
-    assert _status(run, "model.claims_lakehouse.int_humana__claim_families") == "success"
-    assert _families_from(db, "int_humana__claim_families", _checksum(odd)) > 0
+    assert _status(run, "model.claims_lakehouse.int_ma_payer__claim_families") == "success"
+    assert _families_from(db, "int_ma_payer__claim_families", _checksum(odd)) > 0
 
     # Next month: the accepted warnings are not raised again ...
     _publish(store, raw, ["2023-04"])
-    run = _run(lake, [HUMANA_CLAIMS], ["2023-04"], check=True)
+    run = _run(lake, [MA_PAYER_CLAIMS], ["2023-04"], check=True)
     assert run.with_status("warn") == []
     # ... but an unscoped (local, full-history) build still reports them.
-    run = _run(lake, [HUMANA_CLAIMS], None, check=True)
-    assert _status(run, "assert_humana_amounts_consistent") == "warn"
+    run = _run(lake, [MA_PAYER_CLAIMS], None, check=True)
+    assert _status(run, "assert_ma_payer_amounts_consistent") == "warn"
 
 
 # --- 4. many WARN rows become a STOP ------------------------------------------------------
@@ -237,14 +239,14 @@ def test_warn_builds_intermediate_and_is_scoped_to_the_batch(lake: dict) -> None
 def test_many_broken_amount_lines_stop_the_build(lake: dict) -> None:
     raw, db, store = lake["raw"], lake["db"], lake["raw_store"]
     _publish(store, raw, ["2023-03"])
-    broken = _partition(raw, "humana/ma", "medical_claim_lines", "2023-03")
+    broken = _partition(raw, "ma_payer/ma", "medical_claim_lines", "2023-03")
     _edit(broken, "PAID_AMT", _plain_paid_lines(store, broken, 5), _paid_above_allowed)
 
-    run = _run(lake, [HUMANA_CLAIMS], ["2023-03"])
+    run = _run(lake, [MA_PAYER_CLAIMS], ["2023-03"])
     assert run.returncode != 0
-    assert _status(run, "assert_humana_amounts_mostly_consistent") == "fail"
-    assert _status(run, "model.claims_lakehouse.int_humana__claim_families") == "skipped"
-    assert _families_from(db, "int_humana__claim_families", _checksum(broken)) == 0
+    assert _status(run, "assert_ma_payer_amounts_mostly_consistent") == "fail"
+    assert _status(run, "model.claims_lakehouse.int_ma_payer__claim_families") == "skipped"
+    assert _families_from(db, "int_ma_payer__claim_families", _checksum(broken)) == 0
 
 
 # --- 6. the deliveries index (immutable bronze) -------------------------------------------
@@ -318,7 +320,7 @@ def test_runner_keeps_feed_blocked_across_file_types(
     raw, store = lake["raw"], lake["raw_store"]
     state = LocalStateStore(lake["db"])
     raw_vars = {"cclf_raw_root": (raw / "cms" / "cclf").as_posix(),
-                "humana_raw_root": (raw / "humana" / "ma").as_posix()}  # fmt: skip
+                "ma_payer_raw_root": (raw / "ma_payer" / "ma").as_posix()}  # fmt: skip
 
     def deliver(file_type: str, resend: bool = False) -> tuple[Path, FileIngested]:
         src = _partition(store, "cms/cclf", file_type, "2023-03")
@@ -376,9 +378,9 @@ def test_runner_keeps_feed_blocked_across_file_types(
 def test_stop_in_one_payer_still_refreshes_the_other_payers_marts(
     lake: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One batch: a clean CMS claims file and a Humana eligibility file with an empty MBI
+    """One batch: a clean CMS claims file and an MA payer eligibility file with an empty MBI
     (a STOP). The runner builds one pass per feed, so CMS's new month reaches the marts
-    while Humana is held back; the marts are not reported as skipped."""
+    while MA payer is held back; the marts are not reported as skipped."""
     from claims_etl.events import FileIngested
     from claims_etl.transform.config import load_transform_config
     from claims_etl.transform.runner import Outcome, run_transform
@@ -401,34 +403,34 @@ def test_stop_in_one_payer_still_refreshes_the_other_payers_marts(
         return dst, event
 
     header, header_event = deliver("cms/cclf", "claims_header")
-    elig, elig_event = deliver("humana/ma", "member_eligibility")
+    elig, elig_event = deliver("ma_payer/ma", "member_eligibility")
     _edit(elig, "MBI", [0], "")  # STOP: not_null beneficiary_mbi
 
     report = run_transform(
         [elig_event, header_event], config=load_transform_config(),
         state=LocalStateStore(lake["db"]), sink=LocalRunSink(tmp_path / "runs", "r"),
         extra_vars={"cclf_raw_root": (raw / "cms" / "cclf").as_posix(),
-                    "humana_raw_root": (raw / "humana" / "ma").as_posix()},
+                    "ma_payer_raw_root": (raw / "ma_payer" / "ma").as_posix()},
         run_id="r", work_dir=tmp_path,
     )  # fmt: skip
 
     assert report.outcome is Outcome.STOPPED
-    assert [s["feeds"] for s in report.stops] == [["humana"]]
-    assert "model.claims_lakehouse.int_humana__member_versions" in report.skipped
+    assert [s["feeds"] for s in report.stops] == [["ma_payer"]]
+    assert "model.claims_lakehouse.int_ma_payer__member_versions" in report.skipped
     assert not [n for n in report.skipped if ".fct_" in n or ".dim_" in n or ".agg_" in n]
     assert report.marts_root == str(marts_dir(lake["db"]))  # next to the state, not the temp copy
     cms_march = _query(lake["db"], "select count(*) from marts.fct_claims where payer_id = "
                        "'cms_ffs' and latest_delivery_month = '2023-03-01'")  # fmt: skip
-    assert cms_march[0][0] > 0  # CMS's new month is in gold despite the Humana stop
-    assert _families_from(lake["db"], "int_humana__member_versions", _checksum(elig)) == 0
+    assert cms_march[0][0] > 0  # CMS's new month is in gold despite the MA payer stop
+    assert _families_from(lake["db"], "int_ma_payer__member_versions", _checksum(elig)) == 0
 
 
 PAYERS = {
     "cms_ffs": {"payer_id": "cms_ffs", "payer_name": "CMS Medicare Fee-for-Service",
                 "line_of_business": "Medicare FFS", "dbt_source": "cclf",
                 "onboarded_month": "2023-01", "retired_month": None},
-    "humana_ma": {"payer_id": "humana_ma", "payer_name": "Humana Medicare Advantage",
-                  "line_of_business": "Medicare Advantage", "dbt_source": "humana",
+    "ma_payer": {"payer_id": "ma_payer", "payer_name": "a fictional Medicare Advantage payer",
+                  "line_of_business": "Medicare Advantage", "dbt_source": "ma_payer",
                   "onboarded_month": "2023-01", "retired_month": None},
 }  # fmt: skip
 
@@ -443,29 +445,29 @@ def test_payer_registry_retires_offboards_and_onboards_without_sql_changes(lake:
 
     claims_sql = "select payer_id, count(*) from marts.fct_claims group by 1"
     before = payer_rows(claims_sql)
-    assert set(before) == {"cms_ffs", "humana_ma"}
+    assert set(before) == {"cms_ffs", "ma_payer"}
 
-    # Retire Humana as of 2023-01: its history stays, its members are no longer current,
+    # Retire MA payer as of 2023-01: its history stays, its members are no longer current,
     # and its 2023-02 files (after retirement) raise a WARN, not a stop.
-    run = build([PAYERS["cms_ffs"], {**PAYERS["humana_ma"], "retired_month": "2023-01"}])
+    run = build([PAYERS["cms_ffs"], {**PAYERS["ma_payer"], "retired_month": "2023-01"}])
     assert run.returncode == 0, run.stdout  # warnings do not fail a build
     assert _status(run, "assert_no_deliveries_after_payer_retirement") == "warn"
     assert payer_rows("select payer_id, payer_status from marts.dim_payer") == {
-        "cms_ffs": "active", "humana_ma": "retired"}  # fmt: skip
+        "cms_ffs": "active", "ma_payer": "retired"}  # fmt: skip
     assert payer_rows(claims_sql) == before
     assert _query(lake["db"], "select count(*) from marts.dim_member"
-                              " where current_payer_id = 'humana_ma'") == [(0,)]  # fmt: skip
+                              " where current_payer_id = 'ma_payer'") == [(0,)]  # fmt: skip
 
-    # Offboard Humana (removed from the registry): gone from every mart, history kept below.
+    # Offboard MA payer (removed from the registry): gone from every mart, history kept below.
     run = build([PAYERS["cms_ffs"]])
     assert run.returncode == 0, run.stdout
     assert payer_rows(claims_sql) == {"cms_ffs": before["cms_ffs"]}
-    assert not [n for n in run.statuses if "int_humana__conformed" in n]  # views disabled
-    assert _query(lake["db"], "select count(*) > 0 from intermediate.int_humana__claim_families")[
+    assert not [n for n in run.statuses if "int_ma_payer__conformed" in n]  # views disabled
+    assert _query(lake["db"], "select count(*) > 0 from intermediate.int_ma_payer__claim_families")[
         0
     ] == (True,)
 
     # Onboard it again: back in every mart, same numbers.
-    run = build([PAYERS["cms_ffs"], PAYERS["humana_ma"]])
+    run = build([PAYERS["cms_ffs"], PAYERS["ma_payer"]])
     assert run.returncode == 0, run.stdout
     assert payer_rows(claims_sql) == before
