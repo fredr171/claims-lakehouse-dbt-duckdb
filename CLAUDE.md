@@ -530,4 +530,13 @@ ticket result recorded.
       rewrite); dev extra pins synthetic-payer-files@v2.0.0
 - [ ] 2026-11-07: marts (5 payer-agnostic marts, payer registry + conformed contract, one dbt
       pass per feed, transform IAM on the marts bucket) built on branch marts; not deployed
+- [x] 2026-11-12: MA payer rename deployed (terraform apply: 7 in-place changes; triggers
+      cms/cclf/*.csv + ma_payer/ma/*.csv; no drift after). The v1.0.0 MA payer objects under
+      the old prefix were deleted (37 keys in landing + raw; versioned, recoverable 90 days)
+      with their 17 manifests, and their 5 relations dropped from the S3 transform state (CMS
+      tables unchanged), so the first MA payer run builds from scratch. The MA payer raw
+      prefix is empty until re-landed: a manual MA payer transform errors until then
+- [ ] Re-land the MA payer data from synthetic-payer-files v2.0.0
+- [x] 2026-11-12: Terraform local state copied from the old clone (../Claims ETL/infra/terraform,
+      serial 124) into this repo's infra/terraform; that old copy is now stale, never apply from it
 - [ ] Move Terraform state to an S3 backend before CI
