@@ -24,6 +24,8 @@
     )
 }}
 
+-- Lines roll up to one row per claim version. any_value() is safe: every line of a
+-- version agrees on these (stop test assert_ma_payer_claim_version_lines_agree).
 with claim_versions as (
 
     select

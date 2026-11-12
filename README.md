@@ -119,7 +119,7 @@ flowchart LR
 
 ## Testing
 
-250 pytest tests run with no AWS or GitHub access (moto and responses mock them):
+252 pytest tests run with no AWS or GitHub access (moto and responses mock them):
 
 - **Every ingestion check** against deliberately broken fixture files (BOM, ragged rows, bad
   encoding, missing keys, ...).

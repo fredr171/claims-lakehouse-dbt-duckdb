@@ -14,6 +14,8 @@ with the delivery months being processed. Checks:
    the intermediate model, and is scoped: a later month's run does not re-raise it,
    an unscoped run does.
 4. Many broken amount lines in one month turn the amount warning into a STOP.
+   One line of a claim version disagreeing with its siblings (status, adjustment type)
+   is a STOP, for both feeds: the version rollup takes those fields with any_value().
 6. Immutable bronze: an inconsistent deliveries index (a file under another file's
    checksum folder, or two deliveries of one file tied for "current") is a STOP that
    skips the whole feed's staging and intermediate models; so is raw losing a delivery
@@ -247,6 +249,53 @@ def test_many_broken_amount_lines_stop_the_build(lake: dict) -> None:
     assert _status(run, "assert_ma_payer_amounts_mostly_consistent") == "fail"
     assert _status(run, "model.claims_lakehouse.int_ma_payer__claim_families") == "skipped"
     assert _families_from(db, "int_ma_payer__claim_families", _checksum(broken)) == 0
+
+
+# --- 4b. the lines of one claim version disagree -----------------------------------------
+
+
+def _one_version_with_lines(path: Path, key: list[str]) -> list[int]:
+    """Row positions of the first claim version (by `key`) that has more than one line."""
+    positions: dict[tuple, list[int]] = {}
+    for i, row in enumerate(pq.read_table(path, columns=key).to_pylist()):
+        positions.setdefault(tuple(row.values()), []).append(i)
+    return next(rows for rows in positions.values() if len(rows) > 1)
+
+
+def _flip(column: str, a: str, b: str):
+    return lambda row: b if row[column] == a else a
+
+
+@pytest.mark.parametrize(
+    ("feed", "file_type", "key", "column", "value", "select", "test", "families"),
+    [
+        (
+            "ma_payer/ma", "medical_claim_lines", ["CLAIM_ID", "CLAIM_FREQ_CD"],
+            "CLAIM_STATUS", _flip("CLAIM_STATUS", "P", "D"), MA_PAYER_CLAIMS,
+            "assert_ma_payer_claim_version_lines_agree", "int_ma_payer__claim_families",
+        ),
+        (
+            "cms/cclf", "part_b_physician_lines", ["CUR_CLM_UNIQ_ID"],
+            "CLM_ADJSMT_TYPE_CD", _flip("CLM_ADJSMT_TYPE_CD", "0", "1"), CCLF_CLAIMS,
+            "assert_cclf_part_b_version_lines_agree", "int_cclf__claim_families",
+        ),
+    ],
+    ids=["ma_payer", "cclf_part_b"],
+)  # fmt: skip
+def test_lines_of_one_claim_version_that_disagree_stop_the_build(
+    lake: dict, feed, file_type, key, column, value, select, test, families
+) -> None:
+    """Versions roll lines up with any_value(): one line disagreeing is a STOP."""
+    raw, db, store = lake["raw"], lake["db"], lake["raw_store"]
+    _publish(store, raw, ["2023-03"])
+    broken = _partition(raw, feed, file_type, "2023-03")
+    _edit(broken, column, _one_version_with_lines(broken, key)[1:2], value)
+
+    run = _run(lake, [select], ["2023-03"])
+    assert run.returncode != 0
+    assert _status(run, test) == "fail"
+    assert _status(run, f"model.claims_lakehouse.{families}") == "skipped"
+    assert _families_from(db, families, _checksum(broken)) == 0
 
 
 # --- 6. the deliveries index (immutable bronze) -------------------------------------------
