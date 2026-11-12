@@ -1,6 +1,6 @@
--- Humana claim families: one row per original claim, across all deliveries.
+-- MA payer claim families: one row per original claim, across all deliveries.
 --
--- HUM_MEDCLM is line-level; lines roll up to claim versions first. A family is the
+-- MAP_MEDCLM is line-level; lines roll up to claim versions first. A family is the
 -- original (frequency 1) plus any reversal (8: same claim_id, amounts negated) and
 -- replacement (7: new claim_id). Both point back through original_claim_id, so the
 -- family key is coalesce(original_claim_id, claim_id) = the original's claim_id.
@@ -8,7 +8,7 @@
 -- Status comes from which versions are still ACTIVE, i.e. not cancelled by a reversal
 -- (a reversal repeats the claim_id it reverses), so it never depends on version order:
 -- an active replacement -> REPLACED; else an active original -> DENIED (status D) or
--- ORIGINAL; else nothing active -> VOIDED. Unlike CCLF, Humana reversals carry
+-- ORIGINAL; else nothing active -> VOIDED. Unlike CCLF, MA payer reversals carry
 -- negated amounts, so net_paid_amount is simply the sum over every version; a test
 -- checks it against the status rule (voided 0, replaced = replacement, denied 0,
 -- else the original). Service month = month of the original's claim_start_date.
@@ -20,7 +20,7 @@
     config(
         unique_key='claim_family_key',
         incremental_strategy='delete+insert',
-        post_hook="{{ delete_rows_from_vanished_files([ref('stg_humana__medical_claim_lines')]) }}",
+        post_hook="{{ delete_rows_from_vanished_files([ref('stg_ma_payer__medical_claim_lines')]) }}",
     )
 }}
 
@@ -43,7 +43,7 @@ with claim_versions as (
         sum(allowed_amount)                                  as allowed_amount,
         bool_or(capitated_flag = 'Y')                        as is_capitated,
         _source_checksum
-    from {{ ref('stg_humana__medical_claim_lines') }}
+    from {{ ref('stg_ma_payer__medical_claim_lines') }}
     group by claim_id, claim_frequency_code, delivery_month, _source_checksum
 
 ),

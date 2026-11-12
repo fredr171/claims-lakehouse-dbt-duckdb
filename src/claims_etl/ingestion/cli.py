@@ -1,7 +1,7 @@
 """Command-line entry point.
 
     python -m claims_etl.ingestion.cli --key cms/cclf/claims_header/CCLF1_202301.csv
-    python -m claims_etl.ingestion.cli --key humana/ma/member_eligibility/HUM_ELIG_202301.csv
+    python -m claims_etl.ingestion.cli --key ma_payer/ma/member_eligibility/MAP_ELIG_202301.csv
     python -m claims_etl.ingestion.cli --scan
 
 Logs (JSON lines) go to stderr; a JSON summary of manifest records goes to stdout.

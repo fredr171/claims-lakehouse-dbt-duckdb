@@ -1,4 +1,4 @@
--- A Humana member_id maps to exactly one MBI and vice versa, across all deliveries and
+-- An MA payer member_id maps to exactly one MBI and vice versa, across all deliveries and
 -- both files. The MBI is what links a member to their CCLF history when they switch
 -- between fee-for-service and Medicare Advantage, so a remapped ID would merge or split
 -- people downstream. Returns IDs only (never names).
@@ -7,19 +7,19 @@
 
 with pairs as (
 
-    select distinct member_id, beneficiary_mbi from {{ ref('stg_humana__member_eligibility') }}
+    select distinct member_id, beneficiary_mbi from {{ ref('stg_ma_payer__member_eligibility') }}
     union
-    select distinct member_id, beneficiary_mbi from {{ ref('stg_humana__medical_claim_lines') }}
+    select distinct member_id, beneficiary_mbi from {{ ref('stg_ma_payer__medical_claim_lines') }}
 
 ),
 
 -- report only IDs that occur in the batch (all history is still used to find conflicts)
 batch_ids as (
 
-    select member_id, beneficiary_mbi from {{ ref('stg_humana__member_eligibility') }}
+    select member_id, beneficiary_mbi from {{ ref('stg_ma_payer__member_eligibility') }}
     where {{ in_batch() }}
     union
-    select member_id, beneficiary_mbi from {{ ref('stg_humana__medical_claim_lines') }}
+    select member_id, beneficiary_mbi from {{ ref('stg_ma_payer__medical_claim_lines') }}
     where {{ in_batch() }}
 
 )

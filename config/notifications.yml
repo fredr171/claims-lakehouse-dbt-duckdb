@@ -27,11 +27,11 @@ max_details_chars: 500
 next_steps:
   known_file_type: >-
     Upload under <feed prefix><file_type>/ (e.g. cms/cclf/claims_header/ or
-    humana/ma/member_eligibility/) using a folder that has a config for that feed in
+    ma_payer/ma/member_eligibility/) using a folder that has a config for that feed in
     config/file_types/, or add config/file_types/<file_type>.yml for a new type.
   file_name: >-
     Rename the file to match file_name_regex in config/file_types/{file_type}.yml
-    (e.g. CCLF1_YYYYMM.csv or HUM_ELIG_YYYYMM.csv, with a real month 01-12) and re-upload.
+    (e.g. CCLF1_YYYYMM.csv or MAP_ELIG_YYYYMM.csv, with a real month 01-12) and re-upload.
   file_size: >-
     The file is empty or above max_file_bytes. Re-export it; if the size is
     genuine, raise the limit in config/file_types/{file_type}.yml.

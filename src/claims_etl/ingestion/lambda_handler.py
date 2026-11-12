@@ -1,7 +1,7 @@
 """AWS Lambda entry point, deployed by infra/terraform.
 
 Invoked asynchronously by S3 ObjectCreated notifications on the landing bucket
-(one trigger per feed prefix, e.g. cms/cclf/ and humana/ma/, suffix .csv).
+(one trigger per feed prefix, e.g. cms/cclf/ and ma_payer/ma/, suffix .csv).
 Archive/quarantine moves land outside those prefixes, so the function never
 re-triggers itself. Lambda's /tmp is the working
 directory; credentials come from the execution role.

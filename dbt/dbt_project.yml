@@ -14,9 +14,9 @@ clean-targets: ["target", "dbt_packages"]
 vars:
   # Raw (bronze) root per feed:
   #   <root>/<file_type>/delivery_month=<yyyy-mm>/checksum=<sha256>/part-0.parquet
-  # Override for offline tests: --vars '{cclf_raw_root: ..., humana_raw_root: ...}'.
+  # Override for offline tests: --vars '{cclf_raw_root: ..., ma_payer_raw_root: ...}'.
   cclf_raw_root: s3://fredr-claims-raw-2026/cms/cclf
-  humana_raw_root: s3://fredr-claims-raw-2026/humana/ma
+  ma_payer_raw_root: s3://fredr-claims-raw-2026/ma_payer/ma
 
   # Payer registry: the ONLY place the marts learn about payers (macros/payers.sql).
   # Onboard a payer: give its feed staging + intermediate models, add its two conformed
@@ -35,10 +35,10 @@ vars:
       dbt_source: cclf
       onboarded_month: "2023-01"
       retired_month: null
-    - payer_id: humana_ma
-      payer_name: Humana Medicare Advantage
+    - payer_id: ma_payer
+      payer_name: Fictional Medicare Advantage Payer
       line_of_business: Medicare Advantage
-      dbt_source: humana
+      dbt_source: ma_payer
       onboarded_month: "2023-01"
       retired_month: null
 

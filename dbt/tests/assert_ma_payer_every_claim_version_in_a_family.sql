@@ -1,4 +1,4 @@
--- Every Humana claim version (claim_id + frequency code) and every paid dollar in
+-- Every MA payer claim version (claim_id + frequency code) and every paid dollar in
 -- staging must be counted in exactly one claim family. A difference means an
 -- incremental run skipped (or double-counted) a family.
 
@@ -7,14 +7,14 @@ with staged as (
     select
         count(distinct (claim_id, claim_frequency_code)) as claim_versions,
         sum(paid_amount)                                  as paid_amount
-    from {{ ref('stg_humana__medical_claim_lines') }}
+    from {{ ref('stg_ma_payer__medical_claim_lines') }}
 
 ),
 
 in_families as (
 
     select sum(version_count) as claim_versions, sum(net_paid_amount) as paid_amount
-    from {{ ref('int_humana__claim_families') }}
+    from {{ ref('int_ma_payer__claim_families') }}
 
 )
 

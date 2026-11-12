@@ -95,7 +95,7 @@ resource "aws_iam_role_policy" "ingest" {
 
 resource "aws_lambda_function" "ingest" {
   function_name    = var.function_name
-  description      = "Landing CSV (CMS CCLF, Humana MA) -> validated raw Parquet (claims-etl)"
+  description      = "Landing CSV (CMS CCLF, MA payer) -> validated raw Parquet (claims-etl)"
   role             = aws_iam_role.ingest.arn
   runtime          = "python3.13"
   architectures    = ["x86_64"]
@@ -146,7 +146,7 @@ resource "aws_lambda_permission" "allow_landing_bucket" {
 
 # Note: this resource owns the bucket's ENTIRE notification configuration, so
 # every landing-bucket trigger lives here. Filters cannot overlap: .csv files
-# under each feed prefix (cms/cclf/, humana/ma/) -> ingestion;
+# under each feed prefix (cms/cclf/, ma_payer/ma/) -> ingestion;
 # quarantine/*.error.json -> notifier. Archive/quarantine moves live outside the
 # feed prefixes, so ingestion never re-triggers.
 resource "aws_s3_bucket_notification" "landing" {

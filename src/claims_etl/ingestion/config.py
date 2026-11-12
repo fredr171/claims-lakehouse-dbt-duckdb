@@ -125,7 +125,7 @@ class IngestionConfig:
         return _delivery_key(self.quarantine_prefix, source_key, checksum)
 
     def file_types_for_key(self, key: str) -> set[str]:
-        """File types configured for the key's feed (a CCLF folder under humana/ is unknown)."""
+        """File types configured for the key's feed (a CCLF folder under ma_payer/ is unknown)."""
         prefix = self.landing_prefix_for_key(key)
         return {name for name, ft in self.file_types.items() if ft.landing_prefix == prefix}
 

@@ -30,13 +30,13 @@ LAKEHOUSE = Path(__file__).resolve().parents[1]
 DBT_DIR = LAKEHOUSE / "dbt"
 # The generators come from the pinned synthetic-payer-files package (dev extra).
 GENERATOR = "synthetic_payer_files.generate_cclf"
-HUMANA_GENERATOR = "synthetic_payer_files.generate_humana"
+MA_PAYER_GENERATOR = "synthetic_payer_files.generate_ma_payer"
 DBT = Path(sys.executable).with_name("dbt.exe" if os.name == "nt" else "dbt")
 INTERMEDIATE = [
     "int_cclf__beneficiary_versions",
     "int_cclf__claim_families",
-    "int_humana__member_versions",
-    "int_humana__claim_families",
+    "int_ma_payer__member_versions",
+    "int_ma_payer__claim_families",
 ]
 MARTS = ["dim_payer", "dim_member", "fct_claims", "fct_member_months", "agg_payer_monthly"]
 FIXED_INGESTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -50,8 +50,8 @@ HAS_DBT = importlib.util.find_spec("synthetic_payer_files") is not None and DBT.
 def _generate(out: Path) -> tuple[Path, Path]:
     """Run both generators (seed 42, 36 months) into out/; return (CSV root, CMS answer key).
 
-    CSVs land in out/output/{cms,humana}/YYYY-MM/; the Humana answer key in
-    out/answer_key/humana/ and the shared crossover list in out/answer_key/.
+    CSVs land in out/output/{cms,ma_payer}/YYYY-MM/; the MA payer answer key in
+    out/answer_key/ma_payer/ and the shared crossover list in out/answer_key/.
     """
     csv_root, key_dir = out / "output", out / "answer_key"
     months = ["--seed", "42", "--start", "2023-01", "--end", "2025-12"]
@@ -61,8 +61,8 @@ def _generate(out: Path) -> tuple[Path, Path]:
         check=True, capture_output=True,
     )  # fmt: skip
     subprocess.run(
-        [sys.executable, "-m", HUMANA_GENERATOR, *months,
-         "--output-dir", str(csv_root / "humana"), "--answer-key-dir", str(key_dir / "humana"),
+        [sys.executable, "-m", MA_PAYER_GENERATOR, *months,
+         "--output-dir", str(csv_root / "ma_payer"), "--answer-key-dir", str(key_dir / "ma_payer"),
          "--crossover-dir", str(key_dir)],
         check=True, capture_output=True,
     )  # fmt: skip
@@ -179,7 +179,7 @@ def _dbt(
     marts_dir(db).mkdir(parents=True, exist_ok=True)  # DuckDB does not create folders
     dbt_vars = {
         "cclf_raw_root": (raw / "cms" / "cclf").as_posix(),
-        "humana_raw_root": (raw / "humana" / "ma").as_posix(),
+        "ma_payer_raw_root": (raw / "ma_payer" / "ma").as_posix(),
         **(extra_vars or {}),
     }
     command = [

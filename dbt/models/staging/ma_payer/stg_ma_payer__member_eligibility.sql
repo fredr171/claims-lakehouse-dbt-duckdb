@@ -1,11 +1,11 @@
--- HUM_ELIG Humana Medicare Advantage eligibility: one row per member per delivery in
+-- MAP_ELIG a fictional Medicare Advantage payer eligibility: one row per member per delivery in
 -- which the member is new, changed or terminated. Each row carries the member's full
 -- current values. Names and address are synthetic PII: staging only, never in marts.
 
 with source as (
 
     -- Only the current delivery of each file; superseded re-sends stay in raw.
-    {{ current_delivery_rows('humana', 'member_eligibility') }}
+    {{ current_delivery_rows('ma_payer', 'member_eligibility') }}
 
 ),
 

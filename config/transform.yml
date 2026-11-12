@@ -16,7 +16,7 @@ marts_root: s3://fredr-claims-marts-2026
 # Landing feed prefix -> dbt source name (dbt/models/staging/<source>/).
 feeds:
   cms/cclf/: cclf
-  humana/ma/: humana
+  ma_payer/ma/: ma_payer
 
 # A failed build (outcome error) is retried after these delays, by attempt: 1st failure
 # -> 2 min, 2nd -> 5 min, then 10 min (the last value repeats). The handler shortens the

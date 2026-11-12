@@ -214,7 +214,7 @@ def _build_feeds(
 
     Results are merged by unique_id: a later pass's result replaces an earlier one, except
     that `skipped` never replaces a result that ran (the CMS pass built the marts; the
-    Humana pass then stopped and skipped them: the marts WERE built). Written to
+    MA payer pass then stopped and skipped them: the marts WERE built). Written to
     work/target/run_results.json (the artifact the report links).
     """
     merged: dict[str, dict[str, Any]] = {}
@@ -279,7 +279,7 @@ def _read_manifest(target: Path) -> dict[str, Any]:
 
 
 def node_feeds(manifest: dict[str, Any], unique_id: str) -> list[str]:
-    """The dbt sources (= feeds: cclf, humana) a node reads, directly or through models.
+    """The dbt sources (= feeds: cclf, ma_payer) a node reads, directly or through models.
 
     Walks the manifest's parent_map up to `source.<project>.<source>.<table>` nodes. A run
     can build several feeds while a failing test belongs to one: alerts key their issue

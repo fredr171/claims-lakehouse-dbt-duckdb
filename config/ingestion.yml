@@ -9,14 +9,14 @@ raw_bucket: fredr-claims-raw-2026
 # Must match the Terraform variable landing_prefixes (trigger, IAM, raw keys).
 landing_prefixes:
   - cms/cclf/                      # CMS CCLF (Medicare fee-for-service)
-  - humana/ma/                     # Humana Medicare Advantage
+  - ma_payer/ma/                   # a fictional Medicare Advantage payer
 archive_prefix: archive/           # landing bucket; <feed>/<file_type>/checksum=<sha256>/<file_name>
 quarantine_prefix: quarantine/     # landing bucket; same layout as archive/ (+ .error.json)
 manifest_prefix: _manifests/       # in the raw bucket; one <sha256>.json per processed file
 
 # Defaults; a file type may override any of these under its own `limits:` key.
 default_limits:
-  max_file_bytes: 536870912          # 512 MiB; generated CCLF/Humana files are 4-20 KB
+  max_file_bytes: 536870912          # 512 MiB; generated CCLF/MA payer files are 4-20 KB
 
 # Rows per Arrow record batch when writing Parquet (bounds memory use).
 parquet_batch_rows: 50000

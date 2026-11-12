@@ -12,10 +12,10 @@ Two feeds, each with its own landing prefix (`landing_prefixes` in config/ingest
   by `generate-cclf --seed 42` in the separate synthetic-payer-files repo (files in its
   `output/cms/YYYY-MM/`). 2023-01 to 2025-12: 36 months x 4 files = 144 files.
   Replaced CMS DE-SynPUF zips on 2026-11-04.
-- `humana/ma/` (added 2026-11-04): synthetic Humana Medicare Advantage files from
-  `generate-humana --seed 42` (synthetic-payer-files `output/humana/YYYY-MM/`), 36 months x 2 files =
-  72 files. Field names are invented (Humana's real layouts are proprietary); never
-  model them on real Humana files. HUM_ELIG names/addresses are treated like CCLF8 (PII).
+- `ma_payer/ma/` (added 2026-11-04): synthetic files from a fictional Medicare Advantage payer,
+  `generate-ma-payer --seed 42` (synthetic-payer-files `output/ma_payer/YYYY-MM/`), 36 months x 2 files =
+  72 files. Field names are invented; never
+  model them on any real payer's files. MAP_ELIG names/addresses are treated like CCLF8 (PII).
 - Fully synthetic. NEVER use real claims, PHI, or PII anywhere in this project.
   CCLF8 contains synthetic names and addresses: treat them like PII anyway (never
   in issues, logs, or docs).
@@ -24,13 +24,13 @@ Two feeds, each with its own landing prefix (`landing_prefixes` in config/ingest
   - `claims_diagnosis` = CCLF4 Part A diagnosis codes (1-6 rows per claim)
   - `part_b_physician_lines` = CCLF5 Part B physician claim lines
   - `beneficiary_demographics` = CCLF8 (beneficiaries new or changed that month)
-  - `member_eligibility` = HUM_ELIG (members new, changed or terminated that month)
-  - `medical_claim_lines` = HUM_MEDCLM (claim lines; reversal = same CLAIM_ID, freq 8;
+  - `member_eligibility` = MAP_ELIG (members new, changed or terminated that month)
+  - `medical_claim_lines` = MAP_MEDCLM (claim lines; reversal = same CLAIM_ID, freq 8;
     replacement = new CLAIM_ID, freq 7, ORIG_CLAIM_ID = the original)
 - No codebook is used. Expected columns in config/file_types/*.yml come from
   the actual header of each delivered file (inspected before writing config).
 - Observed CSV format (all 216 files, both feeds): delivered as plain .csv (no zip), named
-  `CCLF<n>_YYYYMM.csv` / `HUM_<ELIG|MEDCLM>_YYYYMM.csv`; comma-delimited; ASCII, no BOM; LF line endings; header
+  `CCLF<n>_YYYYMM.csv` / `MAP_<ELIG|MEDCLM>_YYYYMM.csv`; comma-delimited; ASCII, no BOM; LF line endings; header
   and data unquoted; empty string = missing. Headers identical across all months.
   Codes carry leading zeros (PRVDR_FAC_FIPS_ST_CD "05").
 
@@ -51,7 +51,7 @@ Two feeds, each with its own landing prefix (`landing_prefixes` in config/ingest
   -> quarantine notifier reads it and opens/updates a GitHub issue. Ticketing
   failures never affect ingestion or quarantine.
 - Ingestion runs in AWS Lambda `claims-etl-ingest`, triggered by S3 uploads under
-  each landing prefix (cms/cclf/*.csv, humana/ma/*.csv); the CLI runs the same
+  each landing prefix (cms/cclf/*.csv, ma_payer/ma/*.csv); the CLI runs the same
   process_file locally.
 - Infra changes go through Terraform (infra/terraform), never the console. Rebuild
   the packages with `python scripts/build_lambda.py` (and `--transform`) before
@@ -68,9 +68,9 @@ All bucket names, prefixes, and folder names are lowercase snake_case; delivered
 file names are kept exactly as delivered. Partitions use Hive style (key=value).
 
 ```
-<feed> = cms/cclf | humana/ma
+<feed> = cms/cclf | ma_payer/ma
 landing: <feed>/<file_type>/<file_name>.csv            e.g. cms/cclf/claims_header/CCLF1_202301.csv
-                                                            humana/ma/member_eligibility/HUM_ELIG_202301.csv
+                                                            ma_payer/ma/member_eligibility/MAP_ELIG_202301.csv
 raw:     <feed>/<file_type>/delivery_month=<yyyy-mm>/checksum=<sha256>/part-0.parquet
          _manifests/<sha256>.json   (one record per processed file; written only by ingestion)
          _tickets/<sha256>.json     (quarantine ticket record; written only by the notifier)
@@ -120,7 +120,7 @@ ingested before the switch are moved by `scripts/migrate_to_immutable_bronze.py`
 
 ### Ingestion flow (process_file)
 
-1. Triggered by an S3 key under a feed prefix (`cms/cclf/`, `humana/ma/`) ending in
+1. Triggered by an S3 key under a feed prefix (`cms/cclf/`, `ma_payer/ma/`) ending in
    `.csv` in fredr-claims-landing-2026 (us-east-2).
 2. Compute SHA-256 of the file. If a successful manifest record with that
    checksum exists -> outcome `skipped_duplicate`, move file to `archive/`, stop.
@@ -154,8 +154,8 @@ CSV:
 - Data row count > 0
 - Key column(s) never empty or whitespace: `CUR_CLM_UNIQ_ID` + `BENE_MBI_ID`
   (CCLF1); + `CLM_VAL_SQNC_NUM` (CCLF4); + `CLM_LINE_NUM` (CCLF5); `BENE_MBI_ID`
-  (CCLF8); `MEMBER_ID` (HUM_ELIG); `CLAIM_ID` + `CLAIM_LINE_NUM` +
-  `CLAIM_FREQ_CD` + `MEMBER_ID` (HUM_MEDCLM). MBI is not a Humana key (dbt test).
+  (CCLF8); `MEMBER_ID` (MAP_ELIG); `CLAIM_ID` + `CLAIM_LINE_NUM` +
+  `CLAIM_FREQ_CD` + `MEMBER_ID` (MAP_MEDCLM). MBI is not an MA payer key (dbt test).
   Dates are not keys.
 
 Row-level data quality (code formats, dates, amounts, duplicate keys, referential
@@ -269,8 +269,8 @@ ticket result recorded.
 - Sources read raw Parquet directly from S3 via `httpfs` + the AWS credential chain
   (`_cclf__sources.yml` external_location); `delivery_month` comes from the Hive
   partition as text (`hive_types_autocast = false`) and is cast to a date in staging.
-- Staging per feed (`models/staging/<cclf|humana>/stg_<feed>__<file_type>.sql`, views,
-  schema `staging`; one dbt source per feed, `cclf` and `humana`). Shared concepts use the
+- Staging per feed (`models/staging/<cclf|ma_payer>/stg_<feed>__<file_type>.sql`, views,
+  schema `staging`; one dbt source per feed, `cclf` and `ma_payer`). Shared concepts use the
   same column name in both feeds (beneficiary_mbi, claim_start_date, facility_ccn, ...).
   rename to readable snake_case (description keeps the CMS name), `nullif(x, '')`,
   cast. Dates -> DATE, amounts -> DECIMAL(18,2), counts -> INTEGER; codes and IDs stay
@@ -283,9 +283,9 @@ ticket result recorded.
   from raw entirely: raw lost data, so intermediate is skipped instead of pruned).
   Current-state beneficiaries, claim families, and netting of cancellations/adjustments
   belong in intermediate.
-- Intermediate (`models/intermediate/<cclf|humana>/`, incremental tables, schema
-  `intermediate`): `int_cclf__beneficiary_versions` / `int_humana__member_versions` (SCD2 by
-  attribute hash) and `int_cclf__claim_families` / `int_humana__claim_families`. Humana
+- Intermediate (`models/intermediate/<cclf|ma_payer>/`, incremental tables, schema
+  `intermediate`): `int_cclf__beneficiary_versions` / `int_ma_payer__member_versions` (SCD2 by
+  attribute hash) and `int_cclf__claim_families` / `int_ma_payer__claim_families`. MA payer
   family key = coalesce(original_claim_id, claim_id); status from ACTIVE (unreversed)
   versions, never from version order; net = sum of paid over all versions, tested
   against the status rule.
@@ -297,10 +297,10 @@ ticket result recorded.
   `tests/test_dbt_intermediate.py` passing (answer key + incremental == full refresh,
   including old-month re-sends). After changing a model's LOGIC, run it with
   `--full-refresh`: an incremental run only recomputes affected keys.
-- `cclf_raw_root` / `humana_raw_root` vars (default the S3 raw roots) and `CLAIMS_DUCKDB_PATH` env var let tests
+- `cclf_raw_root` / `ma_payer_raw_root` vars (default the S3 raw roots) and `CLAIMS_DUCKDB_PATH` env var let tests
   run dbt fully offline against a local raw folder.
-- CCLF8 and HUM_ELIG names/addresses are in staging only; never select them into marts.
-- `RECORD_CHANGE_TYPE` (CCLF8 and HUM_ELIG) is a synthetic generator helper, not a real
+- CCLF8 and MAP_ELIG names/addresses are in staging only; never select them into marts.
+- `RECORD_CHANGE_TYPE` (CCLF8 and MAP_ELIG) is a synthetic generator helper, not a real
   field: kept in staging only to verify change detection that downstream models derive
   themselves.
 - Tests: `data_tests:` with the `arguments:` key (dbt 1.10+ style). Generic
@@ -323,7 +323,7 @@ ticket result recorded.
 - The generators live in their own repo, github.com/fredr171/synthetic-payer-files (split
   out 2026-11-06; its history keeps the generator commits). This repo installs it from a
   git tag in the `dev` extra (pyproject.toml); tests/dbt_harness.py runs
-  `python -m synthetic_payer_files.generate_cclf` / `.generate_humana` (seed 42, 36 months)
+  `python -m synthetic_payer_files.generate_cclf` / `.generate_ma_payer` (seed 42, 36 months)
   and compares against the answer keys they write.
 - Never edit generator code here. A generator change is a new release there (new tag, never
   a moved tag); then bump the pin here, reinstall
@@ -367,7 +367,7 @@ ticket result recorded.
   content_based_deduplication = true: EventBridge sends no deduplication ID, and without it
   every delivery fails (2026-11-05: 2023-04 events silently dropped). Undeliverable events
   go to the standard queue `claims-etl-transform-undelivered` (rule target DLQ).
-- The runner (claims_etl/transform/runner.py) builds the WHOLE FEED (`source:<cclf|humana>+`),
+- The runner (claims_etl/transform/runner.py) builds the WHOLE FEED (`source:<cclf|ma_payer>+`),
   never one file type: a stop in CCLF5 must still block claim families when CCLF1 arrives.
   ONE dbt PASS PER FEED (in order), so a stop in one payer never freezes the marts for the
   others; results merge by node and a later `skipped` never replaces an earlier result.
@@ -412,8 +412,8 @@ ticket result recorded.
   tests/nodes>` `` (Issues list endpoint, never search); repeat -> comment; a passed/warned
   run whose feeds include the key's feeds -> comment + close. <feeds> = the feeds the
   FAILING tests/nodes read (the runner records `feeds` per stop/warn/error by walking dbt's
-  manifest parent_map to its sources), not the feeds the run built: a cclf+humana run that
-  stops on a Humana test opens a `humana` issue, closed by the next good Humana run
+  manifest parent_map to its sources), not the feeds the run built: a cclf+ma_payer run that
+  stops on an MA payer test opens a `ma_payer` issue, closed by the next good MA payer run
   (2026-11-06: issue #12 stayed open because the key used the run's feeds).
 - Alarms: ALARM -> issue/comment (key `alarm:<name>`), OK -> comment + close. Alarm names
   must match alerts.next_steps.alarms keys (5 alarms: transform DLQ, events undelivered,
@@ -473,28 +473,28 @@ ticket result recorded.
 - [x] 2026-11-04: CCLF delivery months 2023-01 to 2023-03 landed by the user and loaded
       by Lambda (12 files: 87 CCLF1, 206 CCLF4, 82 CCLF5, 161 CCLF8 rows)
 - [ ] Land the remaining months (2023-04 to 2025-12)
-- [x] 2026-11-04: Humana MA feed (`humana/ma/`) added to ingestion: 2 file type configs from
+- [x] 2026-11-04: MA payer feed (`ma_payer/ma/`) added to ingestion: 2 file type configs from
       the real headers, multi-feed config (landing_prefixes), Terraform triggers + IAM per
       feed; all 216 generated files validate and reconcile locally
-- [x] 2026-11-04: Humana feed deployed (terraform apply: 4 in-place changes; triggers
-      cms/cclf/*.csv + humana/ma/*.csv -> claims-etl-ingest; no drift after)
+- [x] 2026-11-04: MA payer feed deployed (terraform apply: 4 in-place changes; triggers
+      cms/cclf/*.csv + ma_payer/ma/*.csv -> claims-etl-ingest; no drift after)
 - [x] 2026-11-04: old CMS data deleted (landing archive/cms/cclf/, raw cms/cclf/, all 12
       manifests): the root generator changed, so CMS is re-landed from ../output/cms/
-- [ ] Land CMS + Humana month by month from 2023-01 (user uploads)
-- [x] 2026-11-04: CMS + Humana 2023-01..03 landed; CMS intermediate matches the answer key
+- [ ] Land CMS + MA payer month by month from 2023-01 (user uploads)
+- [x] 2026-11-04: CMS + MA payer 2023-01..03 landed; CMS intermediate matches the answer key
       each month, incremental == full rebuild
-- [x] 2026-11-04: Humana staging (stg_humana__member_eligibility, stg_humana__medical_claim_lines),
+- [x] 2026-11-04: MA payer staging (stg_ma_payer__member_eligibility, stg_ma_payer__medical_claim_lines),
       43 tests, each shown to fail on broken data; counts and net paid by processed month
-      match the CSVs and ../answer_key/humana/
-- [x] 2026-11-04: Humana intermediate (int_humana__member_versions, int_humana__claim_families):
-      offline test matches ../answer_key/humana/ on all 36 months; incremental == full
-      refresh incl. Humana re-sends; new tests shown to fail on broken data
+      match the CSVs and ../answer_key/ma_payer/
+- [x] 2026-11-04: MA payer intermediate (int_ma_payer__member_versions, int_ma_payer__claim_families):
+      offline test matches ../answer_key/ma_payer/ on all 36 months; incremental == full
+      refresh incl. MA payer re-sends; new tests shown to fail on broken data
 - [x] 2026-11-04: generator refactored onto a shared member registry (FFS <-> MA
       switchers; CCLF8 FFS_END / FFS_RETURN updates set BENE_RNG_END_DT / BGN_DT).
       Seed 42 output changed; the stale S3 files were deleted and re-landed the same day
       (verified 2026-11-05: all 18 raw manifests for 2023-01..03 match a fresh seed-42
-      regeneration). A Humana MA generator was added at the repo root
-      (`../output/humana/`); it is not ingested yet (no file type configs)
+      regeneration). An MA payer generator was added at the repo root
+      (`../output/ma_payer/`); it is not ingested yet (no file type configs)
 - [x] 2026-11-04: dbt project + staging: 4 stg_cclf__* views over raw S3, 48 tests
       passing (row counts match raw); tests verified to fail on broken data
 - [x] 2026-11-04: intermediate incremental models (beneficiary SCD2, claim families),
@@ -523,11 +523,11 @@ ticket result recorded.
       4 added, 4 changed; no drift after) and the 48 existing deliveries migrated (96 moves,
       0 problems; 48/48 manifests updated; re-run finds nothing). A fresh build over the
       migrated raw equals the Lambda state row for row and matches the CMS answer key through
-      2023-08; Humana still stops on the bad HUM_ELIG_202308 (issue #12) until it is re-sent
+      2023-08; MA payer still stops on the bad MAP_ELIG_202308 (issue #12) until it is re-sent
 - [x] 2026-11-06: split into two repos. Generators -> new public repo synthetic-payer-files
       (v1.0.0, history filtered to its files; seed-42 output byte-identical). This repo: the
       lakehouse moved from claims-lakehouse-dbt-duckdb/ to the root (git history kept, no
-      rewrite); dev extra pins synthetic-payer-files@v1.0.0
+      rewrite); dev extra pins synthetic-payer-files@v2.0.0
 - [ ] 2026-11-07: marts (5 payer-agnostic marts, payer registry + conformed contract, one dbt
       pass per feed, transform IAM on the marts bucket) built on branch marts; not deployed
 - [ ] Move Terraform state to an S3 backend before CI

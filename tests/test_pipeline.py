@@ -15,13 +15,13 @@ from claims_etl.ingestion.s3_store import S3Store
 from claims_etl.ingestion.utils import sha256_file
 from tests.conftest import (
     FILE_NAME,
-    HUM_COLUMNS,
-    HUM_FILE_NAME,
-    HUM_LANDING_KEY,
-    HUM_RAW_PARTITION,
-    HUM_ROWS,
     LANDING_BUCKET,
     LANDING_KEY,
+    MAP_COLUMNS,
+    MAP_FILE_NAME,
+    MAP_LANDING_KEY,
+    MAP_RAW_PARTITION,
+    MAP_ROWS,
     RAW_BUCKET,
     VALID_ROWS,
     csv_bytes,
@@ -108,24 +108,24 @@ def test_next_month_lands_in_its_own_partition(s3, config, valid_csv, tmp_path) 
     assert _read_raw(s3, feb_raw).num_rows == 1
 
 
-def test_humana_feed_lands_in_its_own_raw_prefix(s3, config, tmp_path) -> None:
-    hum = write_csv(tmp_path / HUM_FILE_NAME, csv_bytes(HUM_ROWS, header=HUM_COLUMNS))
-    _land(s3, hum, HUM_LANDING_KEY)
-    record = process_file(HUM_LANDING_KEY, config=config, store=s3, batch_id="batch-h")
+def test_ma_payer_feed_lands_in_its_own_raw_prefix(s3, config, tmp_path) -> None:
+    ma = write_csv(tmp_path / MAP_FILE_NAME, csv_bytes(MAP_ROWS, header=MAP_COLUMNS))
+    _land(s3, ma, MAP_LANDING_KEY)
+    record = process_file(MAP_LANDING_KEY, config=config, store=s3, batch_id="batch-h")
 
     assert record.outcome is Outcome.SUCCESS
     assert record.file_type == "member_eligibility"
-    hum_raw = raw_key(record.checksum, HUM_RAW_PARTITION)
-    assert record.output_uri == f"s3://{RAW_BUCKET}/{hum_raw}"
-    table = _read_raw(s3, hum_raw)
+    map_raw = raw_key(record.checksum, MAP_RAW_PARTITION)
+    assert record.output_uri == f"s3://{RAW_BUCKET}/{map_raw}"
+    table = _read_raw(s3, map_raw)
     assert table.column("COUNTY_FIPS").to_pylist() == ["39099", "05001"]  # leading zero kept
-    assert set(table.column("_source_file").to_pylist()) == {HUM_FILE_NAME}
-    assert s3.exists(LANDING_BUCKET, archive_key(hum, HUM_LANDING_KEY))
-    assert not s3.exists(LANDING_BUCKET, HUM_LANDING_KEY)
+    assert set(table.column("_source_file").to_pylist()) == {MAP_FILE_NAME}
+    assert s3.exists(LANDING_BUCKET, archive_key(ma, MAP_LANDING_KEY))
+    assert not s3.exists(LANDING_BUCKET, MAP_LANDING_KEY)
 
 
-def test_cclf_file_under_the_humana_prefix_is_quarantined(s3, config, valid_csv) -> None:
-    wrong_feed_key = f"humana/ma/claims_header/{FILE_NAME}"
+def test_cclf_file_under_the_ma_payer_prefix_is_quarantined(s3, config, valid_csv) -> None:
+    wrong_feed_key = f"ma_payer/ma/claims_header/{FILE_NAME}"
     _land(s3, valid_csv, wrong_feed_key)
     record = process_file(wrong_feed_key, config=config, store=s3)
 

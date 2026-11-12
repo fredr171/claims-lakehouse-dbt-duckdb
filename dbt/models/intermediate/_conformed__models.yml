@@ -31,7 +31,7 @@ models:
         data_tests: [not_null]
       - name: payer_member_id
         data_type: varchar
-        description: "The payer's own member identifier (CMS: MBI; Humana: MEMBER_ID)."
+        description: "The payer's own member identifier (CMS: MBI; MA payer: MEMBER_ID)."
         data_tests: [not_null]
       - name: beneficiary_mbi
         data_type: varchar
@@ -67,8 +67,8 @@ models:
         description: "Delivery month of the row the span's values come from."
         data_tests: [not_null]
 
-  - name: int_humana__conformed_coverage
-    description: "Humana MA enrollment spans in the conformed contract (one row per span)."
+  - name: int_ma_payer__conformed_coverage
+    description: "MA payer enrollment spans in the conformed contract (one row per span)."
     config: {contract: {enforced: true}}
     data_tests: *coverage_tests
     columns: *coverage_columns
@@ -129,8 +129,8 @@ models:
         data_type: boolean
         data_tests: [not_null]
 
-  - name: int_humana__conformed_claims
-    description: "Humana MA claim families in the conformed contract."
+  - name: int_ma_payer__conformed_claims
+    description: "MA payer claim families in the conformed contract."
     config: {contract: {enforced: true}}
     data_tests: *claims_tests
     columns: *claims_columns

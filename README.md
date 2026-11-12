@@ -3,7 +3,7 @@
 [![CI](https://github.com/fredr171/claims-lakehouse-dbt-duckdb/actions/workflows/ci.yml/badge.svg)](https://github.com/fredr171/claims-lakehouse-dbt-duckdb/actions/workflows/ci.yml)
 
 An event-driven ETL pipeline on AWS for monthly healthcare claims deliveries from two payers:
-CMS CCLF (Medicare fee-for-service) and Humana Medicare Advantage. A file dropped in S3 is
+CMS CCLF (Medicare fee-for-service) and a fictional Medicare Advantage payer. A file dropped in S3 is
 validated, stored immutably as Parquet, modeled with dbt into member history and netted
 claims, and published as payer-agnostic marts. Every failure becomes a GitHub issue that
 closes itself when the data recovers.
@@ -12,6 +12,10 @@ All data is **synthetic**, from my seeded generator repo
 [synthetic-payer-files](https://github.com/fredr171/synthetic-payer-files), which also writes
 **answer keys**: the exact results a correct pipeline must produce. The tests check the
 pipeline against them.
+
+**Same spec, two platforms:** the sibling repo
+[claims-lakehouse-databricks-azure](https://github.com/fredr171/claims-lakehouse-databricks-azure)
+builds the same lakehouse on Azure and Databricks, against the same answer keys.
 
 **Stack:** Python 3.13, AWS (S3, Lambda, EventBridge, SQS FIFO, SNS, CloudWatch, SSM),
 Terraform, dbt Core + DuckDB, pyarrow, pytest (moto, responses), ruff.
@@ -132,12 +136,14 @@ flowchart LR
 
 ## Found in live runs
 
-Things the live pipeline exposed, each fixed and covered by a test:
+Things the live pipeline exposed, each fixed and covered by a test. (The live runs predate
+v2.0.0 of synthetic-payer-files, when the MA payer was still branded "Humana", so the linked
+issues use that name.)
 
 - EventBridge → SQS FIFO silently dropped events until content-based deduplication was on.
 - dbt crashed in Lambda (no `/dev/shm` for multiprocessing locks); dbt now starts with threading
   locks, and a test simulates Lambda's environment.
-- Landing 2023-07 before 2023-06 stopped the Humana build on a member change test until the
+- Landing 2023-07 before 2023-06 stopped the MA payer build on a member change test until the
   missing month arrived, then caught up cleanly (issue
   [#11](https://github.com/fredr171/claims-lakehouse-dbt-duckdb/issues/11) opened and closed itself).
 - A bad eligibility file and its re-send drove the switch to immutable bronze, and showed
@@ -182,6 +188,13 @@ why they came first.
 | Discovery | dbt docs and this README | A data catalog with lineage (DataHub or OpenMetadata), model owners via CODEOWNERS, a dbt semantic layer for PMPM | Analysts can find and trust data without asking the builder |
 | Team structure | One dbt project | dbt Mesh: a project per domain (intake, members, claims) exposing contracted public models | Teams ship independently; the payer contract already works this way |
 | Mart design | Shaped by the answer keys and my own definitions (a member month = covered any day; PMPM = net paid by service month) | Requirements, metric definitions and sign-off from actuarial and finance, an owner per mart, definition changes by change request | Member months and PMPM are business definitions; changing one restates history |
+
+## How it was built
+
+I designed this project and built it with [Claude Code](https://claude.com/claude-code) as an
+AI pair programmer: I set the requirements and the design, made the decisions, and reviewed
+the work, and Claude Code wrote much of the implementation. The answer-key tests and the live
+runs verify the result.
 
 ## License
 

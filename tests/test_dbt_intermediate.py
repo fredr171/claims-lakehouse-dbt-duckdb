@@ -1,13 +1,13 @@
 """dbt end to end on generated CCLF data, fully offline (no S3, no AWS credentials).
 
-Both root generators (CMS CCLF and Humana MA, same seed) write all 36 months plus their
+Both root generators (CMS CCLF and MA payer, same seed) write all 36 months plus their
 answer keys into a temp folder; each CSV goes through the real ingestion code
 (validate_file + write_parquet) into a local raw folder laid out per feed exactly like
 S3 (<feed>/<file_type>/delivery_month=.../checksum=...); dbt then builds every model.
 Checks:
 
 1. Full refresh matches both generators' answer keys: CMS (members, changes, claim
-   actions, net paid by service month and by load month) and Humana (members, changes,
+   actions, net paid by service month and by load month) and MA payer (members, changes,
    voids/replacements, net paid by service month, capitated encounters, totals).
 2. Incremental: the same 36 months added in uneven batches equals the full refresh.
 3. Re-sends: corrected re-sends of old months (a dropped beneficiary, a dropped claim, a
@@ -245,10 +245,10 @@ def test_full_refresh_totals_match_summary(generated, full_build) -> None:
     assert (cancels, adjusts) == (summary["cancellations"], summary["adjustments"])
 
 
-# --- 1b. Humana full refresh vs answer_key/humana ----------------------------------------
+# --- 1b. MA payer full refresh vs answer_key/ma_payer ----------------------------------------
 
-# final_members.csv column -> int_humana__member_versions column.
-HUMANA_MEMBER_COLUMNS = {
+# final_members.csv column -> int_ma_payer__member_versions column.
+MA_PAYER_MEMBER_COLUMNS = {
     "MEMBER_ID": "member_id",
     "MBI": "beneficiary_mbi",
     "FIRST_NAME": "first_name",
@@ -279,29 +279,29 @@ HUMANA_MEMBER_COLUMNS = {
 }
 
 
-def test_humana_current_members_match_answer_key(generated, full_build) -> None:
-    expected = {r["MEMBER_ID"]: r for r in _read_key(generated, "humana/final_members.csv")}
+def test_ma_payer_current_members_match_answer_key(generated, full_build) -> None:
+    expected = {r["MEMBER_ID"]: r for r in _read_key(generated, "ma_payer/final_members.csv")}
     select = ", ".join(
-        f"coalesce(cast({c} as varchar), '')" for c in HUMANA_MEMBER_COLUMNS.values()
+        f"coalesce(cast({c} as varchar), '')" for c in MA_PAYER_MEMBER_COLUMNS.values()
     )
     rows = _query(
         full_build,
         f"""select {select}, strftime(first_month, '%Y-%m'), strftime(last_delivered_month, '%Y-%m')
-            from intermediate.int_humana__member_versions
+            from intermediate.int_ma_payer__member_versions
             join (select member_id, min(valid_from) as first_month
-                  from intermediate.int_humana__member_versions group by 1) using (member_id)
+                  from intermediate.int_ma_payer__member_versions group by 1) using (member_id)
             where is_current""",
     )
     assert len(rows) == len(expected) > 0
     for row in rows:
         want = expected[row[0]]
-        got = dict(zip(HUMANA_MEMBER_COLUMNS, row[: len(HUMANA_MEMBER_COLUMNS)], strict=True))
-        assert got == {k: want[k] for k in HUMANA_MEMBER_COLUMNS}, row[0]
+        got = dict(zip(MA_PAYER_MEMBER_COLUMNS, row[: len(MA_PAYER_MEMBER_COLUMNS)], strict=True))
+        assert got == {k: want[k] for k in MA_PAYER_MEMBER_COLUMNS}, row[0]
         assert row[-2:] == (want["FIRST_DELIVERY_MONTH"], want["LAST_DELIVERY_MONTH"]), row[0]
 
 
 # member_changes.csv reason -> (derived change_type, columns of which one must change).
-HUMANA_CHANGE = {
+MA_PAYER_CHANGE = {
     "NEW": ("NEW", set()),
     "PCP": ("UPDATE", {"pcp_npi"}),
     "ADDRESS": ("UPDATE", {"address_line_1"}),
@@ -311,14 +311,14 @@ HUMANA_CHANGE = {
 }
 
 
-def test_humana_versions_match_every_member_change(generated, full_build) -> None:
-    changes = _read_key(generated, "humana/member_changes.csv")
+def test_ma_payer_versions_match_every_member_change(generated, full_build) -> None:
+    changes = _read_key(generated, "ma_payer/member_changes.csv")
     versions = {
         (member, month): (change_type, set(changed))
         for member, month, change_type, changed in _query(
             full_build,
             """select member_id, strftime(valid_from, '%Y-%m'), change_type, changed_columns
-               from intermediate.int_humana__member_versions""",
+               from intermediate.int_ma_payer__member_versions""",
         )
     }
     assert len(versions) == len(changes)  # every delivered row is a real change
@@ -326,20 +326,22 @@ def test_humana_versions_match_every_member_change(generated, full_build) -> Non
     assert {"DISENROLL", "DEATH"} <= reasons  # terminations are really exercised
     for change in changes:
         change_type, changed = versions[(change["MEMBER_ID"], change["delivery_month"])]
-        want_type, columns = HUMANA_CHANGE[change["change_type"]]
+        want_type, columns = MA_PAYER_CHANGE[change["change_type"]]
         assert change_type == want_type, change
         assert (not changed) if want_type == "NEW" else bool(columns & changed), change
 
 
-def test_humana_claim_actions_match_answer_key(generated, full_build) -> None:
-    expected = {r["original_claim_id"]: r for r in _read_key(generated, "humana/claim_actions.csv")}
+def test_ma_payer_claim_actions_match_answer_key(generated, full_build) -> None:
+    expected = {
+        r["original_claim_id"]: r for r in _read_key(generated, "ma_payer/claim_actions.csv")
+    }
     rows = _query(
         full_build,
         """select claim_family_key, action_type, member_id, claim_form_type_code,
                   strftime(original_delivery_month, '%Y-%m'), original_paid_amount::varchar,
                   strftime(action_delivery_month, '%Y-%m'), coalesce(replacement_claim_id, ''),
                   coalesce(replacement_paid_amount::varchar, ''), net_paid_amount::varchar
-           from intermediate.int_humana__claim_families where action_type is not null""",
+           from intermediate.int_ma_payer__claim_families where action_type is not null""",
     )
     assert len(rows) == len(expected) > 0
     fields = ["action_type", "MEMBER_ID", "CLAIM_FORM_TYPE", "original_processed_month",
@@ -349,13 +351,13 @@ def test_humana_claim_actions_match_answer_key(generated, full_build) -> None:
         assert values == [expected[key][f] for f in fields], key
 
 
-def test_humana_net_paid_by_service_month_matches_answer_key(generated, full_build) -> None:
+def test_ma_payer_net_paid_by_service_month_matches_answer_key(generated, full_build) -> None:
     rows = _query(
         full_build,
         """select strftime(service_month, '%Y-%m'),
                   sum(net_paid_amount) filter (where claim_form_type_code = 'I'),
                   sum(net_paid_amount) filter (where claim_form_type_code = 'P')
-           from intermediate.int_humana__claim_families group by 1""",
+           from intermediate.int_ma_payer__claim_families group by 1""",
     )
     got = {month: (i or Decimal("0.00"), p or Decimal("0.00")) for month, i, p in rows}
     expected = {
@@ -363,17 +365,17 @@ def test_humana_net_paid_by_service_month_matches_answer_key(generated, full_bui
             Decimal(r["institutional_net_paid"]),
             Decimal(r["professional_net_paid"]),
         )
-        for r in _read_key(generated, "humana/net_paid_by_service_month.csv")
+        for r in _read_key(generated, "ma_payer/net_paid_by_service_month.csv")
     }
     assert got == expected
 
 
-def test_humana_capitated_encounters_match_answer_key(generated, full_build) -> None:
+def test_ma_payer_capitated_encounters_match_answer_key(generated, full_build) -> None:
     rows = _query(
         full_build,
         """select strftime(service_month, '%Y-%m'), count(*), sum(original_line_count),
                   sum(capitated_allowed_amount)::varchar
-           from intermediate.int_humana__claim_families where is_capitated group by 1""",
+           from intermediate.int_ma_payer__claim_families where is_capitated group by 1""",
     )
     got = {month: (claims, lines, allowed) for month, claims, lines, allowed in rows}
     expected = {
@@ -382,14 +384,14 @@ def test_humana_capitated_encounters_match_answer_key(generated, full_build) -> 
             int(r["capitated_lines"]),
             r["capitated_allowed_amt"],
         )
-        for r in _read_key(generated, "humana/capitated_encounters_by_month.csv")
+        for r in _read_key(generated, "ma_payer/capitated_encounters_by_month.csv")
     }
     assert got == expected
 
 
-def test_humana_totals_match_summary(generated, full_build) -> None:
+def test_ma_payer_totals_match_summary(generated, full_build) -> None:
     summary = json.loads(
-        (generated["key_dir"] / "humana" / "summary.json").read_text(encoding="utf-8")
+        (generated["key_dir"] / "ma_payer" / "summary.json").read_text(encoding="utf-8")
     )
     [row] = _query(
         full_build,
@@ -402,14 +404,15 @@ def test_humana_totals_match_summary(generated, full_build) -> None:
                   count(*) filter (where is_capitated),
                   sum(net_paid_amount) filter (where claim_form_type_code = 'I')::varchar,
                   sum(net_paid_amount) filter (where claim_form_type_code = 'P')::varchar
-           from intermediate.int_humana__claim_families""",
+           from intermediate.int_ma_payer__claim_families""",
     )
     keys = ["original_claims", "institutional_original_claims", "professional_original_claims",
             "replacements", "voids", "denied", "capitated_claims",
             "institutional_total_net_paid", "professional_total_net_paid"]  # fmt: skip
     assert dict(zip(keys, row, strict=True)) == {k: summary[k] for k in keys}
     [(members,)] = _query(
-        full_build, "select count(*) from intermediate.int_humana__member_versions where is_current"
+        full_build,
+        "select count(*) from intermediate.int_ma_payer__member_versions where is_current",
     )
     assert members == summary["members"]
 
@@ -419,7 +422,7 @@ def test_humana_totals_match_summary(generated, full_build) -> None:
 
 def test_marts_net_paid_by_service_month_matches_both_answer_keys(generated, full_build) -> None:
     for payer_id, key_file in [("cms_ffs", "net_paid_by_service_month.csv"),
-                               ("humana_ma", "humana/net_paid_by_service_month.csv")]:  # fmt: skip
+                               ("ma_payer", "ma_payer/net_paid_by_service_month.csv")]:  # fmt: skip
         expected = {r["service_month"]: Decimal(r["total_net_paid"])
                     for r in _read_key(generated, key_file)}  # fmt: skip
         rows = _query(
@@ -445,7 +448,7 @@ def test_marts_member_dimension_matches_the_crossover_answer_key(generated, full
     rows = _query(full_build, "select member_key, coverage_span_count, current_payer_id"
                               " from marts.dim_member where is_multi_payer")  # fmt: skip
     expected = {
-        mbi: (len(rows_) + 1, "humana_ma" if rows_[-1]["direction"] == "FFS_TO_MA" else "cms_ffs")
+        mbi: (len(rows_) + 1, "ma_payer" if rows_[-1]["direction"] == "FFS_TO_MA" else "cms_ffs")
         for mbi, rows_ in switches.items()
     }
     assert {mbi: (spans, payer) for mbi, spans, payer in rows} == expected
@@ -463,12 +466,12 @@ def test_marts_member_months_in_the_last_month_match_final_members(generated, fu
 
     cms = sum(covered(r["BENE_RNG_BGN_DT"], r["BENE_RNG_END_DT"], r["BENE_DEATH_DT"])
               for r in _read_key(generated, "final_members.csv"))  # fmt: skip
-    humana = sum(covered(r["ENROLLMENT_START_DT"], r["ENROLLMENT_END_DT"], r["DEATH_DT"])
-                 for r in _read_key(generated, "humana/final_members.csv"))  # fmt: skip
+    ma_payer = sum(covered(r["ENROLLMENT_START_DT"], r["ENROLLMENT_END_DT"], r["DEATH_DT"])
+                 for r in _read_key(generated, "ma_payer/final_members.csv"))  # fmt: skip
     rows = _query(full_build, "select payer_id, count(*) from marts.fct_member_months"
                               " where month = date '2025-12-01' group by 1 order by 1")  # fmt: skip
-    assert rows == [("cms_ffs", cms), ("humana_ma", humana)]
-    assert cms > 0 and humana > 0
+    assert rows == [("cms_ffs", cms), ("ma_payer", ma_payer)]
+    assert cms > 0 and ma_payer > 0
 
 
 # --- 2 + 3. incremental runs equal a full refresh ---------------------------------------
@@ -524,23 +527,23 @@ def test_incremental_batches_then_resends_equal_full_refresh(generated, full_bui
 
     _resend(raw, "claims_header", "2023-04", drop_and_reprice)
 
-    # Humana: a replacement re-sent away (its family must fall back to VOIDED) and one
+    # MA payer: a replacement re-sent away (its family must fall back to VOIDED) and one
     # member update removed from an eligibility re-send (history re-derived).
     replaced_family, replacement_id, action_month = _query(
         full_build,
         """select claim_family_key, replacement_claim_id, strftime(action_delivery_month, '%Y-%m')
-           from intermediate.int_humana__claim_families
+           from intermediate.int_ma_payer__claim_families
            where action_type = 'REPLACE' order by claim_family_key limit 1""",
     )[0]
     _resend(raw, "medical_claim_lines", action_month,
-            lambda t: _drop_rows(t, "CLAIM_ID", {replacement_id}), feed="humana/ma")  # fmt: skip
+            lambda t: _drop_rows(t, "CLAIM_ID", {replacement_id}), feed="ma_payer/ma")  # fmt: skip
     [(member_updated,)] = _query(
         full_build,
-        """select min(member_id) from intermediate.int_humana__member_versions
+        """select min(member_id) from intermediate.int_ma_payer__member_versions
            where valid_from = '2023-02-01' and change_type = 'UPDATE'""",
     )
     _resend(raw, "member_eligibility", "2023-02",
-            lambda t: _drop_rows(t, "MEMBER_ID", {member_updated}), feed="humana/ma")  # fmt: skip
+            lambda t: _drop_rows(t, "MEMBER_ID", {member_updated}), feed="ma_payer/ma")  # fmt: skip
     _dbt(["run"], raw, db, work)
 
     rebuilt = root / "resend_full.duckdb"
@@ -557,13 +560,13 @@ def test_incremental_batches_then_resends_equal_full_refresh(generated, full_bui
     assert _query(db, "select count(*) from intermediate.int_cclf__claim_families where "
                       "original_amount = 1.23") == [(1,)]  # fmt: skip
     status = (
-        "select family_status from intermediate.int_humana__claim_families"
+        "select family_status from intermediate.int_ma_payer__claim_families"
         " where claim_family_key = '{}'"
     )
     assert _query(full_build, status.format(replaced_family)) == [("REPLACED",)]
     assert _query(db, status.format(replaced_family)) == [("VOIDED",)]
     versions = (
-        "select count(*) from intermediate.int_humana__member_versions where member_id = '{}'"
+        "select count(*) from intermediate.int_ma_payer__member_versions where member_id = '{}'"
     )
     assert _query(db, versions.format(member_updated)) < _query(
         full_build, versions.format(member_updated)
@@ -572,7 +575,7 @@ def test_incremental_batches_then_resends_equal_full_refresh(generated, full_bui
     # Immutable bronze: every original is still in raw, listed as superseded by its re-send.
     for feed, file_types in (
         ("cclf", ["beneficiary_demographics", "claims_header"]),
-        ("humana", ["medical_claim_lines", "member_eligibility"]),
+        ("ma_payer", ["medical_claim_lines", "member_eligibility"]),
     ):
         superseded = _query(
             db,

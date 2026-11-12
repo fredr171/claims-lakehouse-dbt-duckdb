@@ -1,7 +1,7 @@
 """Shared fixtures. Fixture CSVs are built in tmp_path at test time; no data files in git.
 
 Tests use a small 3-column claims_header config (CMS CCLF feed) and a 3-column
-member_eligibility config (Humana MA feed) so fixtures stay readable. Both keep
+member_eligibility config (MA payer feed) so fixtures stay readable. Both keep
 the real naming regex, raw key template and key columns; the real headers are
 covered separately in test_config.py.
 """
@@ -28,12 +28,12 @@ COLUMNS = ["CUR_CLM_UNIQ_ID", "BENE_MBI_ID", "PRVDR_FAC_FIPS_ST_CD"]
 FILE_NAME = "CCLF1_202301.csv"
 LANDING_KEY = f"cms/cclf/claims_header/{FILE_NAME}"
 RAW_PARTITION = "cms/cclf/claims_header/delivery_month=2023-01"  # + /checksum=<sha>/part-0.parquet
-# Second feed (Humana MA).
-HUM_COLUMNS = ["MEMBER_ID", "MBI", "COUNTY_FIPS"]
-HUM_FILE_NAME = "HUM_ELIG_202301.csv"
-HUM_LANDING_KEY = f"humana/ma/member_eligibility/{HUM_FILE_NAME}"
-HUM_RAW_PARTITION = "humana/ma/member_eligibility/delivery_month=2023-01"
-HUM_ROWS = [["H100000001", "6AA3QX1NP94", "39099"], ["H100000002", "9GD7PX4RK74", "05001"]]
+# Second feed (MA payer).
+MAP_COLUMNS = ["MEMBER_ID", "MBI", "COUNTY_FIPS"]
+MAP_FILE_NAME = "MAP_ELIG_202301.csv"
+MAP_LANDING_KEY = f"ma_payer/ma/member_eligibility/{MAP_FILE_NAME}"
+MAP_RAW_PARTITION = "ma_payer/ma/member_eligibility/delivery_month=2023-01"
+MAP_ROWS = [["H100000001", "6AA3QX1NP94", "39099"], ["H100000002", "9GD7PX4RK74", "05001"]]
 # Synthetic values in the generator's formats (not real identifiers).
 VALID_ROWS = [
     ["1000085822452", "6AA3QX1NP94", "39"],
@@ -65,7 +65,7 @@ def write_test_config(config_dir: Path) -> Path:
         "region": REGION,
         "landing_bucket": LANDING_BUCKET,
         "raw_bucket": RAW_BUCKET,
-        "landing_prefixes": ["cms/cclf/", "humana/ma/"],
+        "landing_prefixes": ["cms/cclf/", "ma_payer/ma/"],
         "archive_prefix": "archive/",
         "quarantine_prefix": "quarantine/",
         "manifest_prefix": "_manifests/",
@@ -75,7 +75,7 @@ def write_test_config(config_dir: Path) -> Path:
     # Reuse the real naming rules so tests exercise them; shrink only the columns.
     (config_dir / "ingestion.yml").write_text(yaml.safe_dump(settings), encoding="utf-8")
     real_dir = Path(__file__).resolve().parents[1] / "config/file_types"
-    for name, columns in (("claims_header", COLUMNS), ("member_eligibility", HUM_COLUMNS)):
+    for name, columns in (("claims_header", COLUMNS), ("member_eligibility", MAP_COLUMNS)):
         file_type = yaml.safe_load((real_dir / f"{name}.yml").read_text(encoding="utf-8"))
         file_type.pop("limits", None)
         file_type["expected_columns"] = columns

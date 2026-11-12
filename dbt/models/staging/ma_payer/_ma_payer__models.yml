@@ -1,7 +1,7 @@
-# Staging: one model per Humana file type, one row per raw row of the CURRENT delivery of
-# each file (stg_humana__deliveries lists every delivery, superseded ones included).
+# Staging: one model per MA payer file type, one row per raw row of the CURRENT delivery of
+# each file (stg_ma_payer__deliveries lists every delivery, superseded ones included).
 # Each description starts with the delivered column name. Field names are invented by
-# the synthetic generator; Humana's real layouts are proprietary.
+# the synthetic generator, not modeled on any real payer's files.
 # Tests check what staging promises (keys, types, code domains, delivery rules);
 # member history and claim families (reversal/replacement netting) are tested downstream.
 # Severity (macros/test_scoping.sql): tests are STOPs by default (dbt severity error;
@@ -9,17 +9,17 @@
 # nothing skipped, scoped to the delivery months being processed.
 
 models:
-  - name: stg_humana__deliveries
+  - name: stg_ma_payer__deliveries
     description: >
-      Every Humana MA file delivered to raw, one row per delivery (immutable bronze). A
+      Every MA payer file delivered to raw, one row per delivery (immutable bronze). A
       corrected re-send of a file is a second row for the same file_name; the latest
-      ingested one is current and the others are superseded. The humana staging models read
+      ingested one is current and the others are superseded. The ma_payer staging models read
       only current deliveries (macros/deliveries.sql); superseded ones stay in raw for audit.
     data_tests:
       - delivery_index_is_consistent  # STOP: misplaced file, or a tie for "current"
       - raw_keeps_every_built_delivery:  # STOP: raw lost a delivery intermediate used
           arguments:
-            intermediate_models: ['int_humana__member_versions', 'int_humana__claim_families']
+            intermediate_models: ['int_ma_payer__member_versions', 'int_ma_payer__claim_families']
       - unique_combination_of_columns:
           arguments:
             combination_of_columns: [file_type, checksum]
@@ -28,7 +28,7 @@ models:
         description: Raw folder (file type) the delivery came from.
         data_tests: [not_null]
       - name: file_name
-        description: File name exactly as delivered (the delivery's identity, e.g. HUM_ELIG_202308.csv).
+        description: File name exactly as delivered (the delivery's identity, e.g. MAP_ELIG_202308.csv).
         data_tests: [not_null]
       - name: delivery_month
         description: Delivery month from the file name (raw partition), as the first of the month.
@@ -51,9 +51,9 @@ models:
       - name: deliveries_of_file
         description: How many times this file_name was delivered (more than 1 = re-sent).
 
-  - name: stg_humana__member_eligibility
+  - name: stg_ma_payer__member_eligibility
     description: >
-      HUM_ELIG Medicare Advantage eligibility, typed and renamed. One row per member per
+      MAP_ELIG Medicare Advantage eligibility, typed and renamed. One row per member per
       delivery in which the member is new, changed or terminated, with full current
       values. Contains synthetic names/addresses: never select them into marts.
     data_tests:
@@ -62,7 +62,7 @@ models:
             combination_of_columns: [member_id, delivery_month]
     columns:
       - name: member_id
-        description: "MEMBER_ID. Humana member ID (synthetic, H + 9 digits)."
+        description: "MEMBER_ID. MA payer member ID (synthetic, H + 9 digits)."
         data_tests: [not_null]
       - name: beneficiary_mbi
         description: "MBI. Medicare Beneficiary Identifier; the same MBI as in CCLF for members who switch between FFS and MA."
@@ -179,9 +179,9 @@ models:
         name: _batch_id
         description: "Ingestion run ID."
 
-  - name: stg_humana__medical_claim_lines
+  - name: stg_ma_payer__medical_claim_lines
     description: >
-      HUM_MEDCLM Medicare Advantage medical claims, typed and renamed. One row per line
+      MAP_MEDCLM Medicare Advantage medical claims, typed and renamed. One row per line
       per claim version: an original (frequency 1), a reversal (8, same claim_id, amounts
       negated) or a replacement (7, new claim_id). Reversals and replacements point to
       the original through original_claim_id.
@@ -199,12 +199,12 @@ models:
       - name: original_claim_id
         description: "ORIG_CLAIM_ID. The original's claim_id on reversals/replacements; NULL on originals (claim family key)."
       - name: member_id
-        description: "MEMBER_ID. Humana member ID."
+        description: "MEMBER_ID. MA payer member ID."
         data_tests:
           - not_null
           - relationships:
               arguments:
-                to: ref('stg_humana__member_eligibility')
+                to: ref('stg_ma_payer__member_eligibility')
                 field: member_id
               config: *warn
       - name: beneficiary_mbi
@@ -279,7 +279,7 @@ models:
         data_tests: *yes_no
       - name: capitated_flag
         description: "CAPITATED_FLAG. Y = capitated encounter (paid_amount 0, no paid_date)."
-        data_tests:  # STOP: drives is_capitated in int_humana__claim_families
+        data_tests:  # STOP: drives is_capitated in int_ma_payer__claim_families
           - accepted_values:
               arguments:
                 values: ["Y", "N"]

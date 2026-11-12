@@ -8,11 +8,11 @@ the seeded generators in a separate repo,
 [synthetic-payer-files](https://github.com/fredr171/synthetic-payer-files):
 
 - **CMS CCLF** (Claim and Claim Line Feed, Medicare fee-for-service), from `generate-cclf`.
-- **Humana Medicare Advantage** eligibility and medical claims, from `generate-humana`.
-  Its field names are invented: Humana's real layouts are proprietary.
+- **A fictional Medicare Advantage (MA) payer:** eligibility and medical claims, from `generate-ma-payer`.
+  Its field names are invented, not modeled on any real payer's files.
 
 The files landed in S3 are that repo's committed seed-42 output (`output/cms/`,
-`output/humana/`). This repo's dev extra pins a release tag (`v1.0.0`), so the end-to-end
+`output/ma_payer/`). This repo's dev extra pins a release tag (`v1.0.0`), so the end-to-end
 dbt tests generate exactly the data their hardcoded counts and answer keys describe.
 
 No real claims, PHI, or PII are used anywhere.
@@ -35,7 +35,7 @@ All buckets are in `us-east-2` with Block Public Access and SSE-S3 encryption.
 ## Source files
 
 One CSV per file type per month, 2023-01 to 2025-12: 36 months × 4 CCLF files (144) plus
-36 months × 2 Humana files (72). Both feeds share the same format: comma-delimited, unquoted,
+36 months × 2 MA payer files (72). Both feeds share the same format: comma-delimited, unquoted,
 UTF-8 (ASCII in practice), LF line endings, empty string = missing.
 
 Each feed has its own landing prefix, and every file type belongs to exactly one feed.
@@ -49,12 +49,12 @@ Each feed has its own landing prefix, and every file type belongs to exactly one
 | `CCLF5_YYYYMM.csv` | `part_b_physician_lines` | Part B physician claim lines | 33 | `CUR_CLM_UNIQ_ID`, `CLM_LINE_NUM`, `BENE_MBI_ID` |
 | `CCLF8_YYYYMM.csv` | `beneficiary_demographics` | Beneficiaries that are new or changed that month | 26 | `BENE_MBI_ID` |
 
-**Humana Medicare Advantage** (landing prefix `humana/ma/`)
+**Fictional MA payer** (landing prefix `ma_payer/ma/`)
 
 | File | `file_type` | Content | Columns | Key columns (never empty) |
 |---|---|---|---|---|
-| `HUM_ELIG_YYYYMM.csv` | `member_eligibility` | Members that are new, changed or terminated that month (full rows) | 28 | `MEMBER_ID` |
-| `HUM_MEDCLM_YYYYMM.csv` | `medical_claim_lines` | Claim lines, institutional and professional in one file; a reversal reuses `CLAIM_ID` with `CLAIM_FREQ_CD 8` | 56 | `CLAIM_ID`, `CLAIM_LINE_NUM`, `CLAIM_FREQ_CD`, `MEMBER_ID` |
+| `MAP_ELIG_YYYYMM.csv` | `member_eligibility` | Members that are new, changed or terminated that month (full rows) | 28 | `MEMBER_ID` |
+| `MAP_MEDCLM_YYYYMM.csv` | `medical_claim_lines` | Claim lines, institutional and professional in one file; a reversal reuses `CLAIM_ID` with `CLAIM_FREQ_CD 8` | 56 | `CLAIM_ID`, `CLAIM_LINE_NUM`, `CLAIM_FREQ_CD`, `MEMBER_ID` |
 
 `MBI` (the Medicare ID that links a member who switches between fee-for-service and Medicare
 Advantage) is not an ingestion key. Missing MBIs are a dbt staging test, not a reason to
@@ -88,8 +88,8 @@ file stays in landing so the next run retries it.
 
 | Level | Check | Fails when |
 |---|---|---|
-| file | `known_file_type` | key is not `<feed prefix><file type of that feed>/<file>` (e.g. a CCLF folder under `humana/ma/`) |
-| file | `file_name` | name does not match the type's regex (`CCLF1_YYYYMM.csv`, `HUM_ELIG_YYYYMM.csv`, month 01–12) |
+| file | `known_file_type` | key is not `<feed prefix><file type of that feed>/<file>` (e.g. a CCLF folder under `ma_payer/ma/`) |
+| file | `file_name` | name does not match the type's regex (`CCLF1_YYYYMM.csv`, `MAP_ELIG_YYYYMM.csv`, month 01–12) |
 | file | `file_size` | 0 bytes or above the configured maximum |
 | CSV | `csv_utf8` / `csv_parseable` | not UTF-8, or malformed quoting |
 | CSV | `csv_header` | names or order differ from config (a UTF-8 BOM also fails here) |
@@ -103,7 +103,7 @@ belongs in dbt staging tests, not here.
 
 ### S3 layout
 
-`<feed>` is `cms/cclf` or `humana/ma`:
+`<feed>` is `cms/cclf` or `ma_payer/ma`:
 
 ```
 landing   <feed>/<file_type>/<file>.csv                     ← drop new files here
@@ -114,8 +114,8 @@ raw       <feed>/<file_type>/delivery_month=<yyyy-mm>/checksum=<sha256>/part-0.p
           _tickets/<sha256>.json
 ```
 
-For example, `humana/ma/member_eligibility/HUM_ELIG_202301.csv` becomes
-`humana/ma/member_eligibility/delivery_month=2023-01/checksum=<sha256>/part-0.parquet` in raw.
+For example, `ma_payer/ma/member_eligibility/MAP_ELIG_202301.csv` becomes
+`ma_payer/ma/member_eligibility/delivery_month=2023-01/checksum=<sha256>/part-0.parquet` in raw.
 
 **Immutable bronze.** Nothing a payer delivers is ever overwritten or deleted. Raw partitions
 encode **delivery identity**: the month from the file name (never data content:
@@ -156,17 +156,17 @@ The config is validated on load. For example:
 
 The dbt project in [`dbt/`](../dbt/) reads raw Parquet straight from S3 (DuckDB `httpfs`, AWS
 credential chain; no copy step) and builds staging views in a local DuckDB file. Each feed has
-its own dbt source and staging folder (`models/staging/cclf/`, `models/staging/humana/`).
+its own dbt source and staging folder (`models/staging/cclf/`, `models/staging/ma_payer/`).
 
 | Model | Grain | Unique key |
 |---|---|---|
-| `staging.stg_cclf__deliveries` / `stg_humana__deliveries` (tables) | delivered file | `file_type`, `checksum` |
+| `staging.stg_cclf__deliveries` / `stg_ma_payer__deliveries` (tables) | delivered file | `file_type`, `checksum` |
 | `staging.stg_cclf__claims_header` | claim version | `claim_id` |
 | `staging.stg_cclf__claims_diagnosis` | diagnosis per claim version | `claim_id`, `diagnosis_sequence_number` |
 | `staging.stg_cclf__part_b_physician_lines` | line per claim version | `claim_id`, `line_number` |
 | `staging.stg_cclf__beneficiary_demographics` | beneficiary per delivery | `beneficiary_mbi`, `delivery_month` |
-| `staging.stg_humana__member_eligibility` | member per delivery | `member_id`, `delivery_month` |
-| `staging.stg_humana__medical_claim_lines` | line per claim version | `claim_id`, `line_number`, `claim_frequency_code` |
+| `staging.stg_ma_payer__member_eligibility` | member per delivery | `member_id`, `delivery_month` |
+| `staging.stg_ma_payer__medical_claim_lines` | line per claim version | `claim_id`, `line_number`, `claim_frequency_code` |
 
 **Which delivery counts.** Raw keeps every delivery. `stg_<feed>__deliveries` lists them all,
 one row per delivered file, with `is_current` (the latest ingested delivery of each file name),
@@ -199,7 +199,7 @@ and delivery rules:
   - every CCLF4 diagnosis belongs to a CCLF1 claim;
   - claim load dates fall inside their delivery month;
   - every claim's beneficiary arrived in a CCLF8 delivery no later than the claim.
-- **Humana:**
+- **MA payer:**
   - processed dates and the eligibility as-of date fall inside the delivery month, and a claim
     is never processed before it was received;
   - frequency code, status and `original_claim_id` agree (original, replacement, reversal);
@@ -229,7 +229,7 @@ Each test is a **stop** or a **warn** (policy in `dbt/macros/test_scoping.sql`):
   (`--vars '{delivery_months: ["2025-03"]}'`), warns check only those months, so an
   accepted warning does not come back on every later delivery. Local builds without
   the var check everything.
-- Humana amount rules (paid ≤ allowed ≤ billed, denied pays nothing, cost share =
+- MA payer amount rules (paid ≤ allowed ≤ billed, denied pays nothing, cost share =
   allowed − paid, reversals never positive) warn per line. They **stop** when more than
   1% of a month's lines (and at least 5) break them, because that means a broken
   extract rather than a few odd lines.
@@ -250,7 +250,7 @@ cd dbt
 
 ## Intermediate: state across deliveries (incremental)
 
-Both feeds deliver deltas. CCLF8 and HUM_ELIG carry only new, changed or terminated members.
+Both feeds deliver deltas. CCLF8 and MAP_ELIG carry only new, changed or terminated members.
 Claim files carry only the versions processed that month, and a cancellation, adjustment,
 reversal or replacement of an earlier claim can arrive months later. So intermediate is
 incremental, but **not append-only**: a new delivery can change rows built from older ones.
@@ -259,8 +259,8 @@ incremental, but **not append-only**: a new delivery can change rows built from 
 |---|---|---|
 | `int_cclf__beneficiary_versions` | beneficiary version (SCD type 2) | `beneficiary_version_id` |
 | `int_cclf__claim_families` | claim family = original + later cancellation/adjustment | `claim_family_key` (`part:claim_control_number`) |
-| `int_humana__member_versions` | member version (SCD type 2) | `member_version_id` |
-| `int_humana__claim_families` | claim family = original + later reversal/replacement | `claim_family_key` (the original's `claim_id`) |
+| `int_ma_payer__member_versions` | member version (SCD type 2) | `member_version_id` |
+| `int_ma_payer__claim_families` | claim family = original + later reversal/replacement | `claim_family_key` (the original's `claim_id`) |
 
 - **Beneficiary versions.** A new version starts when the hash of the tracked attributes
   differs from the previous delivered row. This works for change-only deliveries and for
@@ -277,10 +277,10 @@ incremental, but **not append-only**: a new delivery can change rows built from 
 
   Part B rolls CCLF5 lines up to claims first. A cancellation whose original was never
   loaded still forms a family (`has_original = false`, a warning) instead of being dropped.
-- **Humana member versions.** The same hash-based SCD2. `change_type` adds `TERM` for the
+- **MA payer member versions.** The same hash-based SCD2. `change_type` adds `TERM` for the
   version in which `enrollment_end_date` first appears. `file_as_of_date` moves every month,
   so it isn't tracked; `last_file_as_of_date` keeps the newest one.
-- **Humana claim families.** Lines roll up to claim versions, which group on
+- **MA payer claim families.** Lines roll up to claim versions, which group on
   `coalesce(original_claim_id, claim_id)`, the original's ID. The status comes from which
   versions are still active (not cancelled by a reversal, which repeats the claim ID it
   reverses), so it never depends on version order:
@@ -288,7 +288,7 @@ incremental, but **not append-only**: a new delivery can change rows built from 
   - an active original → `DENIED` (status D) or `ORIGINAL`;
   - nothing active → `VOIDED`.
 
-  Humana reversals carry negated amounts, so `net_paid_amount` is simply the sum over every
+  MA payer reversals carry negated amounts, so `net_paid_amount` is simply the sum over every
   version. A test checks that sum against the status rule (voided 0, replaced = the
   replacement, denied 0, else the original). That test caught a real bug while the model
   was being built: a same-day reversal sorted after its replacement.
@@ -315,7 +315,7 @@ into a local raw folder, and runs dbt against it. Checks:
 - A full refresh matches both answer keys exactly:
   - **CMS:** every current member with every attribute, every member change, all claim
     actions, net paid by service month and by load month, and the totals.
-  - **Humana:** every current member, every member change (including disenrollments and
+  - **MA payer:** every current member, every member change (including disenrollments and
     deaths), every void and replacement, net paid by service month, capitated encounters
     by month, and the totals.
 - Loading the months in uneven batches (3, then 1 at a time, then 24 at once) gives the
@@ -323,8 +323,8 @@ into a local raw folder, and runs dbt against it. Checks:
 - Re-sending old months then also equals a full refresh:
   - CCLF8 drops a beneficiary and a history row;
   - CCLF1 drops a claim and reprices one;
-  - HUM_MEDCLM drops a replacement, so that family falls back to `VOIDED`;
-  - HUM_ELIG drops a member update.
+  - MAP_MEDCLM drops a replacement, so that family falls back to `VOIDED`;
+  - MAP_ELIG drops a member update.
 
 The test was shown to fail when the vanished-file cleanup is removed. Skip it with
 `pytest -m "not dbt"`.
@@ -345,7 +345,7 @@ The marts know nothing about any payer. They are built from two things only:
   (YAML anchors) and enforced by dbt (`contract: enforced`): a view with a missing, extra or
   mistyped column does not build. Payer-specific mapping happens in these views only:
 
-  | Concept | CMS FFS (CCLF) | Humana MA |
+  | Concept | CMS FFS (CCLF) | MA payer |
   |---|---|---|
   | member id | MBI | `MEMBER_ID` |
   | coverage span | `BENE_RNG_BGN_DT`/`END_DT`, latest delivered row per start date | enrollment start/end, latest row per start date |
@@ -447,7 +447,7 @@ Remove-Variable t
 
 ## Automatic ingestion (AWS Lambda)
 
-Uploading a `.csv` under `s3://fredr-claims-landing-2026/cms/cclf/` or `humana/ma/` triggers the
+Uploading a `.csv` under `s3://fredr-claims-landing-2026/cms/cclf/` or `ma_payer/ma/` triggers the
 `claims-etl-ingest` Lambda, which runs the same `process_file`. It's defined in
 [`infra/terraform/`](../infra/terraform/):
 
@@ -456,8 +456,8 @@ Uploading a `.csv` under `s3://fredr-claims-landing-2026/cms/cclf/` or `humana/m
 | Lambda `claims-etl-ingest` | Python 3.13, 1024 MB, 300 s timeout, 2 GB `/tmp` |
 | pyarrow | AWS SDK for pandas public layer (`AWSSDKPandas-Python313:17`, pyarrow 24) |
 | Package | `build/lambda.zip`: our code, `config/`, PyYAML, requests (~1.6 MB, deterministic; shared with the notifier) |
-| IAM role | Least privilege: read/delete each feed prefix (`cms/cclf/*`, `humana/ma/*`), write `archive/*` and `quarantine/*` in landing, write the feed prefixes and `_manifests/*` in raw, own log group only |
-| Trigger | S3 `ObjectCreated`, one per feed prefix (`cms/cclf/`, `humana/ma/`), suffix `.csv` (archive/quarantine moves can't re-trigger) |
+| IAM role | Least privilege: read/delete each feed prefix (`cms/cclf/*`, `ma_payer/ma/*`), write `archive/*` and `quarantine/*` in landing, write the feed prefixes and `_manifests/*` in raw, own log group only |
+| Trigger | S3 `ObjectCreated`, one per feed prefix (`cms/cclf/`, `ma_payer/ma/`), suffix `.csv` (archive/quarantine moves can't re-trigger) |
 | Retries | An `error` outcome raises, so Lambda retries async invocations twice. `quarantined` is final and not retried |
 | Logs | `/aws/lambda/claims-etl-ingest`, JSON lines, 30-day retention |
 | Notifier | `claims-etl-notify` (`notifier.tf`): 256 MB, 300 s timeout, same package without the pandas layer; trigger `quarantine/*.error.json` |
@@ -492,15 +492,15 @@ claims-etl-ingest ──FileIngested──► EventBridge rule ──► SQS FIF
 2. **Queue.** A FIFO queue with a single message group runs builds one at a time, in order.
    Up to 10 waiting events share one build.
 3. **Build** ([`transform/runner.py`](../src/claims_etl/transform/runner.py)). The runner selects
-   the **whole feed** (`source:cclf+` / `source:humana+`), not just the file type that arrived.
+   the **whole feed** (`source:cclf+` / `source:ma_payer+`), not just the file type that arrived.
    A bad CCLF5 file must keep blocking claim families even when a clean CCLF1 comes next. With
    `source:cclf.claims_header+` the CCLF5 stop tests would not run, and the bad lines would
    flow in (`test_dbt_gating.py` checks this). `delivery_months` is set to the events' months,
    so only the WARN tests are scoped (see [Stop vs warn](#stop-vs-warn)). dbt runs in a
    subprocess against a **working copy** of the DuckDB state file, **one pass per feed**
    (in order). The marts are downstream of every feed, so each pass rebuilds them: a stop in
-   Humana skips the marts in the Humana pass, but the CMS pass already rebuilt them from
-   CMS's new data and Humana's last good state. Results are merged by node, and a later
+   MA payer skips the marts in the MA payer pass, but the CMS pass already rebuilt them from
+   CMS's new data and the MA payer's last good state. Results are merged by node, and a later
    `skipped` never hides an earlier result that ran. The marts follow the state: the S3 state
    publishes them to `marts_root` in `config/transform.yml` (the marts bucket), a local state
    file (`--db`) gets a `<state>_marts/` folder next to it.
@@ -563,7 +563,7 @@ CloudWatch alarm (ALARM/OK) ──► SNS claims-etl-alerts ──► claims-etl
 - **Transform runs.** A `stopped` or `error` run opens an issue labeled `pipeline-alert`,
   `transform` and `stopped` or `error`. The issue names the feeds the *failing* tests or
   nodes read (traced through dbt's manifest to their sources), not every feed the run built:
-  a run that builds CMS and Humana but stops on a Humana test opens a `humana` issue. The
+  a run that builds CMS and MA payer but stops on an MA payer test opens a `ma_payer` issue. The
   same problem in a later run adds a comment instead. A later `passed` or `warned` run that
   built those feeds comments and closes it, so an open transform issue always means
   "still broken".
@@ -603,14 +603,14 @@ and a headerless file whose first row must not reach a public issue.
 ## Loaded so far
 
 Both feeds are landed month by month from 2023-01 (through 2023-08 so far), including
-deliberate curve balls: 2023-07 landed before 2023-06, and a HUM_ELIG_202308 with an empty MBI
+deliberate curve balls: 2023-07 landed before 2023-06, and a MAP_ELIG_202308 with an empty MBI
 that was later re-sent. All 216 generated files (seed 42) pass validation and reconcile
 locally against the real config:
 
 | Feed | File type | Files | Rows |
 |---|---|---|---|
 | CMS CCLF | `claims_header` / `claims_diagnosis` / `part_b_physician_lines` / `beneficiary_demographics` | 4 × 36 | 749 / 1,716 / 634 / 931 |
-| Humana MA | `member_eligibility` / `medical_claim_lines` | 2 × 36 | 861 / 602 |
+| MA payer | `member_eligibility` / `medical_claim_lines` | 2 × 36 | 861 / 602 |
 
 ## Project layout
 
@@ -652,9 +652,9 @@ tests/                      pytest for ingestion + notifier; test_dbt_intermedia
 dbt/
   dbt_project.yml, profiles.yml   DuckDB target, S3 via credential chain (no secrets)
   models/staging/cclf/            _cclf__sources.yml, _cclf__models.yml, stg_cclf__*.sql
-  models/staging/humana/          _humana__sources.yml, _humana__models.yml, stg_humana__*.sql
+  models/staging/ma_payer/          _ma_payer__sources.yml, _ma_payer__models.yml, stg_ma_payer__*.sql
   models/intermediate/cclf/       int_cclf__beneficiary_versions, int_cclf__claim_families
-  models/intermediate/humana/     int_humana__member_versions, int_humana__claim_families
+  models/intermediate/ma_payer/     int_ma_payer__member_versions, int_ma_payer__claim_families
   models/intermediate/*/          int_<src>__conformed_coverage / _claims (+ _conformed__models.yml)
   models/marts/                   dim_payer, dim_member, fct_claims, fct_member_months, agg_payer_monthly
   macros/                         generate_schema_name, incremental_by_affected_keys, payers

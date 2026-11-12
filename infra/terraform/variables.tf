@@ -25,7 +25,7 @@ variable "marts_bucket" {
 variable "landing_prefixes" {
   description = "One prefix per feed; .csv objects under each trigger ingestion. Must match landing_prefixes in config/ingestion.yml."
   type        = list(string)
-  default     = ["cms/cclf/", "humana/ma/"]
+  default     = ["cms/cclf/", "ma_payer/ma/"]
 
   validation {
     condition     = length(var.landing_prefixes) > 0 && alltrue([for p in var.landing_prefixes : endswith(p, "/")])

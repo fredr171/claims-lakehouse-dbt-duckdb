@@ -27,7 +27,7 @@ dev = [
     "tzdata; sys_platform == 'win32'",  # pyarrow needs it to read tz-aware timestamps on Windows
     # Test data for the end-to-end dbt tests. Pinned to a release: its seed-42 output is
     # what the hardcoded counts in tests/test_dbt_intermediate.py describe.
-    "synthetic-payer-files @ git+https://github.com/fredr171/synthetic-payer-files@v1.0.0",
+    "synthetic-payer-files @ git+https://github.com/fredr171/synthetic-payer-files@v2.0.0",
 ]
 
 # Transformations (dbt/). Kept out of the core deps: the Lambda package never needs them.

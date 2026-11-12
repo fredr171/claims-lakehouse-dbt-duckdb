@@ -12,12 +12,12 @@ from claims_etl.ingestion import cli, lambda_handler
 from claims_etl.ingestion.config import CONFIG_DIR_ENV_VAR
 from claims_etl.ingestion.models import ManifestRecord, Outcome
 from tests.conftest import (
-    HUM_COLUMNS,
-    HUM_FILE_NAME,
-    HUM_LANDING_KEY,
-    HUM_ROWS,
     LANDING_BUCKET,
     LANDING_KEY,
+    MAP_COLUMNS,
+    MAP_FILE_NAME,
+    MAP_LANDING_KEY,
+    MAP_ROWS,
     csv_bytes,
     write_csv,
 )
@@ -55,12 +55,12 @@ def test_exit_code(outcomes: list[Outcome], code: int) -> None:
 def test_scan_processes_only_landing_csvs_in_every_feed(
     s3, config, config_dir: Path, valid_csv, tmp_path: Path, capsys
 ) -> None:
-    hum = write_csv(tmp_path / HUM_FILE_NAME, csv_bytes(HUM_ROWS, header=HUM_COLUMNS))
+    ma = write_csv(tmp_path / MAP_FILE_NAME, csv_bytes(MAP_ROWS, header=MAP_COLUMNS))
     s3.upload(valid_csv, LANDING_BUCKET, LANDING_KEY)
-    s3.upload(hum, LANDING_BUCKET, HUM_LANDING_KEY)
+    s3.upload(ma, LANDING_BUCKET, MAP_LANDING_KEY)
     s3.put_json(LANDING_BUCKET, "cms/cclf/claims_header/notes.json", {})
-    s3.upload(hum, LANDING_BUCKET, f"elsewhere/{HUM_FILE_NAME}")  # not a feed prefix
-    assert cli.scan_keys(s3, config) == [LANDING_KEY, HUM_LANDING_KEY]
+    s3.upload(ma, LANDING_BUCKET, f"elsewhere/{MAP_FILE_NAME}")  # not a feed prefix
+    assert cli.scan_keys(s3, config) == [LANDING_KEY, MAP_LANDING_KEY]
 
     code = cli.main(["--scan", "--config-dir", str(config_dir)])
     summary = json.loads(capsys.readouterr().out)

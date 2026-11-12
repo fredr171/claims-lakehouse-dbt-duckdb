@@ -1,4 +1,4 @@
--- HUM_MEDCLM Humana Medicare Advantage medical claims: one row per line per claim
+-- MAP_MEDCLM a fictional Medicare Advantage payer medical claims: one row per line per claim
 -- version per delivery. Institutional (UB-04, form I) and professional (CMS-1500,
 -- form P) claims share the file; fields that do not apply to a form are NULL.
 -- Claim-level fields repeat on every line. A reversal reuses claim_id with frequency 8
@@ -8,7 +8,7 @@
 with source as (
 
     -- Only the current delivery of each file; superseded re-sends stay in raw.
-    {{ current_delivery_rows('humana', 'medical_claim_lines') }}
+    {{ current_delivery_rows('ma_payer', 'medical_claim_lines') }}
 
 ),
 
